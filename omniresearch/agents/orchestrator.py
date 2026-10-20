@@ -31,6 +31,7 @@ from ..tools import ToolRegistry, build_tools
 from ..tools.knowledge import KnowledgeBase
 from ..tools.memory import Memory
 from ..cognition.experience import Experience, Reflector, trace_for_reflection
+from ..cognition.instant import InstantLearner
 from .base import AgentResult, EventHook
 from .protocol import parse_json_object
 from .subagents import AnalystAgent, CriticAgent, PlannerAgent, ScoutAgent, SpecialistAgent, SynthesizerAgent
@@ -94,7 +95,7 @@ class ResearchReport:
                 {"agent": f.agent, "task": f.task, "steps": f.steps, "attempts": f.attempts,
                  "confidence": f.confidence, "elapsed": round(f.elapsed, 1), "thinking": f.thinking,
                  "verification": f.verification, "tool_calls": f.tool_calls, "sources": f.sources,
-                 "content": f.content}
+                 "attempt_history": f.attempt_history, "content": f.content}
                 for f in self.findings
             ],
             "critiques": self.critiques,
@@ -114,7 +115,7 @@ class ResearchOrchestrator:
     def __init__(self, config: Config | None = None, backend: LLMBackend | None = None,
                  tools: ToolRegistry | None = None, *, on_event: EventHook | None = None,
                  kb: KnowledgeBase | None = None, memory: Memory | None = None,
-                 experience: Experience | None = None) -> None:
+                 experience: Experience | None = None, learner: InstantLearner | None = None) -> None:
         self.config = config or Config()
         self.config.ensure_dirs()
         self.backend = backend or build_backend(self.config)
@@ -122,9 +123,10 @@ class ResearchOrchestrator:
         self.kb = kb or KnowledgeBase(self.config.knowledge_db)
         self.memory = memory or Memory(self.config.memory_db)
         self.experience = experience or Experience(self.config.experience_db)
+        self.learner = learner or InstantLearner(self.kb, self.experience, self.config.answers_db)
         if tools is None:
             tools, online = build_tools(self.config, self.session_id, kb=self.kb, memory=self.memory,
-                                        experience=self.experience)
+                                        experience=self.experience, learner=self.learner)
         else:
             online = any(not t.offline for t in tools)
         self.tools = tools
@@ -294,6 +296,7 @@ class ResearchOrchestrator:
         if save:
             report.output_path = self._save(report)
             self._remember(report)
+        self.learner.remember(question, report.report, sources=report.sources, session=self.session_id)
         self._emit("done", elapsed=report.elapsed, path=str(report.output_path) if report.output_path else "")
         return report
 
@@ -329,10 +332,23 @@ class ResearchOrchestrator:
                          session=report.session_id)
 
     # ------------------------------------------------------------------ follow-up chat
-    def ask(self, question: str, report: ResearchReport | None = None) -> str:
-        """Quick single-agent answer, optionally grounded in a previous report (used by `chat`)."""
+    def ask(self, question: str, report: ResearchReport | None = None, *, fresh: bool = False) -> str:
+        """Quick answer: instantly from what was learned before if a close match exists, else one specialist."""
+        question = question.strip()
+        if self.config.instant_recall and not fresh and report is None:
+            hit = self.learner.recall(question, min_similarity=self.config.recall_similarity)
+            if hit:
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(hit["created"]))
+                self._emit("instant_recall", similarity=hit["similarity"], learned_at=when)
+                return (f"{hit['answer']}\n\n_(answered instantly from what I learned on {when}; "
+                        f"similarity {hit['similarity']:.2f}. Ask with --fresh to work it out again.)_")
         domain = route_domains(question, max_domains=1)[0]
         agent = SpecialistAgent(domain, self.backend, self.tools, max_steps=self.preset["max_steps"],
                                 language=self.language, on_event=self.on_event, **self._cognition())
         context = f"Previous report:\n{report.report[:12000]}" if report else ""
-        return agent.run(question, context).content
+        result = agent.run(question, context)
+        trustworthy = result.confidence is None or result.confidence >= self.config.min_confidence
+        if trustworthy and result.content and not result.content.startswith("(model error"):
+            self.learner.remember(question, result.content, confidence=result.confidence, sources=result.sources,
+                                  session=self.session_id)
+        return result.content

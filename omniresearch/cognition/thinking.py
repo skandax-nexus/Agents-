@@ -159,9 +159,11 @@ class ThinkingAgent(Agent):
 
         result = AgentResult(agent=self.name, task=task, content="")
         verification = Verification()
+        history: list[dict] = []
         for attempt in range(1, self.max_attempts + 1):
             result = super().run(task, full_context.strip())
             result.attempts = attempt
+            result.attempt_history = history
             if not self.verify_enabled:
                 break
             verification = self.verify(task, result, thought)
@@ -169,6 +171,8 @@ class ThinkingAgent(Agent):
             if ok or attempt == self.max_attempts:
                 break
             problems = "; ".join(verification.problems) or "the answer did not meet the success criteria"
+            history.append({"attempt": attempt, "content": result.content, "confidence": verification.confidence,
+                            "problems": verification.problems})
             self._emit("retry", attempt=attempt, reason=problems[:200])
             full_context += (f"\n\n## Previous attempt (#{attempt}) failed verification\nProblems: {problems}\n"
                              f"Do differently: {verification.fix_strategy or 'address every problem above'}\n"

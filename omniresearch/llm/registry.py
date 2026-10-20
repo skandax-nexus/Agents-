@@ -9,9 +9,24 @@ from .ollama import OllamaBackend
 from .openai_compat import OpenAICompatBackend
 
 
+def _student_model(cfg: Config) -> str | None:
+    """Name of the self-trained student model, if one was adopted (see omniresearch train)."""
+    try:
+        import json
+        record = json.loads((cfg.home / "training" / "student.json").read_text())
+        return str(record.get("ollama_model") or "") or None
+    except (OSError, ValueError):
+        return None
+
+
 def _ollama(cfg: Config) -> OllamaBackend:
-    return OllamaBackend(cfg.ollama_url, cfg.model, temperature=cfg.temperature, max_tokens=cfg.max_tokens,
-                         num_ctx=cfg.num_ctx, timeout=cfg.request_timeout)
+    backend = OllamaBackend(cfg.ollama_url, cfg.model, temperature=cfg.temperature, max_tokens=cfg.max_tokens,
+                            num_ctx=cfg.num_ctx, timeout=cfg.request_timeout)
+    if cfg.model is None:
+        student = _student_model(cfg)
+        if student and any(m.split(":")[0] == student.split(":")[0] for m in backend.installed_models()):
+            backend.model = student
+    return backend
 
 
 def _openai(cfg: Config) -> OpenAICompatBackend:
@@ -43,7 +58,7 @@ def build_backend(cfg: Config) -> LLMBackend:
     choice = (cfg.backend or "auto").lower()
     if choice == "ollama":
         backend = _ollama(cfg)
-        if cfg.model is None:
+        if cfg.model is None and backend.model == backend.pick_model() or cfg.model is None and not backend.installed_models():
             backend.model = backend.pick_model()
         return backend
     if choice in {"openai", "llamacpp", "llama.cpp", "lmstudio", "vllm"}:

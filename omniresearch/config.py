@@ -54,6 +54,8 @@ class Config:
     deliberate: bool | None = None     # think before acting (None = follow depth preset)
     verify: bool | None = None         # self-check answers and retry (None = follow depth preset)
     reflect: bool = True               # learn lessons/facts/skills after every run
+    instant_recall: bool = True        # answer from previously learned answers when a question closely matches
+    recall_similarity: float = 0.6     # how close a stored question must be (0-1) to reuse its answer
     max_attempts: int | None = None    # retries after a failed self-check (None = preset)
     min_confidence: float = 0.6        # below this a verified answer is retried
 
@@ -80,6 +82,10 @@ class Config:
     @property
     def experience_db(self) -> Path:
         return self.home / "experience.db"
+
+    @property
+    def answers_db(self) -> Path:
+        return self.home / "answers.db"
 
     @property
     def knowledge_db(self) -> Path:

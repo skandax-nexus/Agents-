@@ -47,14 +47,16 @@ class ToolRegistry:
 
 
 def build_tools(cfg: Config, session_id: str, *, kb: KnowledgeBase | None = None,
-                memory: Memory | None = None, experience=None) -> tuple[ToolRegistry, bool]:
+                memory: Memory | None = None, experience=None, learner=None) -> tuple[ToolRegistry, bool]:
     """Assemble the full tool set for a run. Returns (registry, online_flag)."""
     from ..cognition.experience import Experience, experience_tools  # local import avoids an import cycle
+    from ..cognition.instant import InstantLearner, instant_tools
 
     cfg.ensure_dirs()
     kb = kb or KnowledgeBase(cfg.knowledge_db)
     memory = memory or Memory(cfg.memory_db)
     experience = experience or Experience(cfg.experience_db)
+    learner = learner or InstantLearner(kb, experience, cfg.answers_db)
     online = cfg.online if cfg.online is not None else has_connectivity()
 
     tools: list[Tool] = []
@@ -64,5 +66,6 @@ def build_tools(cfg: Config, session_id: str, *, kb: KnowledgeBase | None = None
         tools.append(python_tool(cfg.home / "sandbox", timeout=cfg.python_timeout))
     tools += memory_tools(memory, session_id)
     tools += experience_tools(experience, session_id)
+    tools += instant_tools(learner, session_id)
     tools += web_tools(kb, kiwix_url=cfg.kiwix_url, online=online)
     return ToolRegistry(tools), online

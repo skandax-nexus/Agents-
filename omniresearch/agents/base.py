@@ -28,6 +28,7 @@ class AgentResult:
     verification: dict = field(default_factory=dict)
     confidence: float | None = None
     attempts: int = 1
+    attempt_history: list[dict] = field(default_factory=list)   # earlier attempts that failed verification
 
     def summary(self, limit: int = 4000) -> str:
         text = self.content

@@ -15,7 +15,10 @@ dependencies = []
 online = ["anthropic>=1.0"]
 pdf = ["pypdf>=4.0"]
 dev = ["pytest>=8.0"]
-all = ["anthropic>=1.0", "pypdf>=4.0", "pytest>=8.0"]
+train = ["torch>=2.1", "transformers>=4.40", "peft>=0.10", "datasets>=2.18", "accelerate>=0.28"]
+train-dpo = ["trl>=0.9"]
+all = ["anthropic>=1.0", "pypdf>=4.0", "pytest>=8.0", "torch>=2.1", "transformers>=4.40", "peft>=0.10",
+       "datasets>=2.18", "accelerate>=0.28"]
 
 [project.scripts]
 omniresearch = "omniresearch.cli:main"

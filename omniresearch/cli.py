@@ -47,6 +47,26 @@ def _print_event(kind: str, data: dict) -> None:
         print(f"  [{agent}] retrying after attempt {data.get('attempt')}: {data.get('reason', '')[:120]}")
     elif kind == "classified":
         print(f"  type: {data.get('type')} | difficulty: {data.get('difficulty')} | strategy: {data.get('strategy')} - {data.get('why', '')}")
+    elif kind == "instant_recall":
+        print(f"  answered instantly from memory (learned {data.get('learned_at')}, similarity {data.get('similarity'):.2f})")
+    elif kind == "practice_generated":
+        print(f"\n== practice: {data['count']} problem(s) in {data['domain']} ==")
+    elif kind == "practice_solved":
+        print(f"  [{data['domain']}] {'KEPT' if data['passed'] else 'discarded'} (confidence {data.get('confidence')}, {data.get('attempts')} attempt(s))")
+    elif kind == "dataset":
+        print(f"\n== dataset: {data['train']} train / {data['eval']} eval examples, {data['pairs']} preference pairs ==")
+    elif kind == "model_loaded":
+        print(f"  model {data['base']} on {data['device']}: {data['trainable_params']:,} trainable of {data['total_params']:,} params")
+    elif kind == "train_start":
+        print(f"  training on {data['examples']} examples, {data['updates']} updates (eval loss before: {data.get('eval_loss_before')})")
+    elif kind == "train_step":
+        print(f"  step {data['update']}/{data['of']} loss {data['loss']} ({data['elapsed']}s)")
+    elif kind == "train_done":
+        print(f"  trained: loss {data.get('train_loss_first')} -> {data.get('train_loss_last')}, eval {data.get('eval_loss_before')} -> {data.get('eval_loss_after')} in {data.get('elapsed_seconds')}s")
+    elif kind == "exported":
+        print(f"  export: {'created in Ollama as ' + data['ollama_model'] if data.get('created') else data.get('instructions')}")
+    elif kind == "round_done":
+        print(f"\n== round {data['round']}: {data['note']} ==")
     elif kind == "learned":
         print(f"  learned: {data.get('lessons', 0)} lesson(s), {data.get('facts', 0)} fact(s), {data.get('skills', 0)} skill(s)"
               + (f" | {data.get('self_assessment')}" if data.get("self_assessment") else ""))
@@ -107,7 +127,7 @@ def cmd_solve(args: argparse.Namespace) -> int:
     except LLMError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    sol = solver.solve(problem)
+    sol = solver.solve(problem, fresh=args.fresh)
     print("\n" + "=" * 78 + "\n")
     print(f"# {sol.restated}\n")
     print(sol.answer)
@@ -116,6 +136,153 @@ def cmd_solve(args: argparse.Namespace) -> int:
     if sol.output_path:
         print(f"Saved: {sol.output_path}")
     return 0
+
+
+def _learner(cfg):
+    from .cognition.experience import Experience
+    from .cognition.instant import InstantLearner
+    from .tools.knowledge import KnowledgeBase
+
+    cfg.ensure_dirs()
+    kb = KnowledgeBase(cfg.knowledge_db)
+    return InstantLearner(kb, Experience(cfg.experience_db), cfg.answers_db)
+
+
+def cmd_learn(args: argparse.Namespace) -> int:
+    """Teach the agent instantly: text, files/directories, or URLs."""
+    cfg = _config_from_args(args)
+    learner = _learner(cfg)
+    done = 0
+    for path in args.file or []:
+        info = learner.learn_file(path)
+        print(f"file {path}: " + (f"indexed {info['files_indexed']} file(s)" if info.get("stored") else f"not stored ({info.get('reason') or 'nothing new'})"))
+        done += int(bool(info.get("stored")))
+    if args.url:
+        from .tools.web import web_tools
+        from .tools.registry import ToolRegistry
+        fetch = ToolRegistry(web_tools(learner.kb, kiwix_url=cfg.kiwix_url, online=True)).get("web_fetch")
+        for url in args.url:
+            info = learner.learn_url(url, fetch)
+            print(f"url {url}: " + ("stored" if info.get("stored") else f"failed ({info.get('reason')})"))
+            done += int(bool(info.get("stored")))
+    text = " ".join(args.text).strip()
+    if text == "-":
+        text = sys.stdin.read().strip()
+    if text:
+        info = learner.learn_text(text, title=args.title)
+        print(f"learned '{info['title']}' ({info['chars']} chars)" if info.get("stored") else f"not stored ({info.get('reason')})")
+        done += int(bool(info.get("stored")))
+    if not done and not (args.file or args.url or text):
+        print("Give something to learn: text, --file PATH, or --url URL", file=sys.stderr)
+        return 2
+    st = learner.stats()
+    print(f"knowledge: {st['documents']} documents / {st['chunks']} chunks; learned answers: {st['answers']}")
+    return 0
+
+
+def cmd_answer(args: argparse.Namespace) -> int:
+    """Quick answer: instantly from what was learned, otherwise one specialist (and then it is learned)."""
+    from .agents.orchestrator import ResearchOrchestrator
+
+    cfg = _config_from_args(args)
+    question = " ".join(args.question).strip()
+    if not question:
+        print("Ask a question.", file=sys.stderr)
+        return 2
+    if cfg.instant_recall and not args.fresh:
+        hit = _learner(cfg).recall(question, min_similarity=cfg.recall_similarity)
+        if hit:   # no model needed at all
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(hit["created"]))
+            print(hit["answer"])
+            print(f"\n(answered instantly from what I learned on {when}; similarity {hit['similarity']:.2f}. --fresh to redo)")
+            return 0
+    try:
+        orchestrator = ResearchOrchestrator(cfg, on_event=None if args.quiet else _print_event)
+    except LLMError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(orchestrator.ask(question, fresh=args.fresh))
+    return 0
+
+
+def cmd_learned(args: argparse.Namespace) -> int:
+    cfg = _config_from_args(args)
+    learner = _learner(cfg)
+    if args.forget:
+        learner.forget(args.forget)
+        print(f"forgot answer {args.forget}")
+        return 0
+    st = learner.stats()
+    print(f"learned answers: {st['answers']} (used instantly {st['instant_hits']} times); "
+          f"knowledge: {st['documents']} documents; experience: {st['experience']['total']} entries")
+    query = " ".join(args.query)
+    if query:
+        hit = learner.recall(query, min_similarity=0.0)
+        if hit:
+            print(f"\nclosest: #{hit['id']} (similarity {hit['similarity']}) {hit['question']}\n{hit['answer'][:800]}")
+        return 0
+    for r in learner.recent(20):
+        print(f"\n#{r['id']} [{time.strftime('%Y-%m-%d', time.localtime(r['created']))}, used {r['uses']}x] {r['question']}\n  {r['answer'][:300].replace(chr(10), ' ')}")
+    return 0
+
+
+def cmd_train(args: argparse.Namespace) -> int:
+    """Optional: fine-tune a local model on everything the system has verified."""
+    from .training.loop import SelfTrainingLoop, current_student
+    from .training.dataset import DatasetBuilder
+
+    cfg = _config_from_args(args)
+    cfg.ensure_dirs()
+    ev = None if args.quiet else _print_event
+    if args.train_cmd == "status":
+        s = current_student(cfg)
+        print("student model: " + (f"{s['ollama_model']} (round {s['round']}, base {s['base_model']}, in Ollama: {s['created_in_ollama']})" if s else "none yet"))
+        summary = cfg.home / "training" / "data" / "summary.json"
+        print("dataset: " + (summary.read_text().strip() if summary.exists() else "not built"))
+        return 0
+    if args.train_cmd == "dataset":
+        from .cognition.experience import Experience
+        b = DatasetBuilder(min_confidence=max(0.7, cfg.min_confidence))
+        b.add_traces(cfg.output_dir)
+        b.add_experience(Experience(cfg.experience_db))
+        print(b.write(cfg.home / "training" / "data"))
+        return 0
+    from .cognition.solver import ProblemSolver
+    try:
+        solver = ProblemSolver(cfg, on_event=ev)
+    except LLMError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    def student_factory(merged_dir):
+        return None  # evaluated by eval-loss unless the student is imported into Ollama
+
+    loop = SelfTrainingLoop(cfg, solver, base_model=args.base, on_event=ev, train=args.train_cmd != "practice")
+    if args.train_cmd == "practice":
+        print(loop.practice(args.domains, args.per_domain, args.difficulty, args.max_problems))
+        return 0
+    if args.train_cmd == "eval":
+        print(loop.evaluate(solver.backend, args.limit))
+        return 0
+    if args.train_cmd == "run":
+        if not args.base:
+            print("--base <hf-model-id-or-dir> is required (e.g. Qwen/Qwen2.5-0.5B-Instruct)", file=sys.stderr)
+            return 2
+        try:
+            stats, trainer = loop.train(args.base, epochs=args.epochs, max_examples=args.max_examples)
+        except Exception as exc:  # noqa: BLE001
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        merged = trainer.merge_and_save()
+        print(trainer.export_ollama(args.name, merged))
+        return 0
+    if args.train_cmd == "auto":
+        for r in loop.run(args.rounds, domains=args.domains, per_domain=args.per_domain, epochs=args.epochs,
+                          student_name=args.name):
+            print(f"round {r.round}: {r.note} | practice kept {r.practice.get('kept')} | dataset {r.dataset.get('train')} | "
+                  f"eval base {r.eval_base.get('combined')} student {r.eval_student.get('combined')}")
+        return 0
+    return 2
 
 
 def cmd_feedback(args: argparse.Namespace) -> int:
@@ -189,6 +356,10 @@ def cmd_chat(args: argparse.Namespace) -> int:
         if line.startswith("/feedback "):
             orchestrator.experience.add_feedback(line[len("/feedback "):], session=orchestrator.session_id)
             print("noted - I will apply that from now on.")
+            continue
+        if line.startswith("/learn "):
+            info = orchestrator.learner.learn_text(line[len("/learn "):], session=orchestrator.session_id)
+            print(f"learned '{info.get('title')}' - I know this from now on." if info.get("stored") else "nothing to learn")
             continue
         print("\n" + orchestrator.ask(line, last_report))
 
@@ -287,6 +458,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"Experience: {es['lesson']} lessons, {es['fact']} facts, {es['skill']} skills, {es['feedback']} feedback")
     except Exception as exc:  # noqa: BLE001
         print(f"Experience: unavailable ({exc})")
+    try:
+        st = _learner(cfg).stats()
+        print(f"Learned answers: {st['answers']} (instant hits so far: {st['instant_hits']})")
+    except Exception as exc:  # noqa: BLE001
+        print(f"Learned answers: unavailable ({exc})")
+    try:
+        import torch  # noqa: F401
+        import peft  # noqa: F401
+        print("Training (optional): available")
+    except ImportError:
+        print("Training (optional): not installed (pip install 'omniresearch[train]') - instant learning works without it")
     preset = cfg.preset()
     print(f"Cognition: deliberate={bool(preset['deliberate'])} verify={bool(preset['verify'])} "
           f"max_attempts={preset['max_attempts']} reflect={cfg.reflect}")
@@ -331,13 +513,61 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("solve", help="solve any problem: calculation, design, decision, troubleshooting, plan, puzzle ...")
     p.add_argument("problem", nargs="+")
+    p.add_argument("--fresh", action="store_true", help="ignore learned answers and solve again")
     p.add_argument("--depth", choices=list(DEPTH_PRESETS))
     p.add_argument("--language")
     p.add_argument("--quiet", action="store_true")
     _add_common(p)
     p.set_defaults(func=cmd_solve)
 
-    p = sub.add_parser("feedback", help="teach the agent: feedback is recalled on every future run")
+    p = sub.add_parser("learn", help="teach it instantly: text, --file paths/dirs, --url pages (no training needed)")
+    p.add_argument("text", nargs="*", help="text to learn ('-' reads stdin)")
+    p.add_argument("--file", action="append", help="file or directory to learn (repeatable)")
+    p.add_argument("--url", action="append", help="web page to learn (repeatable, needs network)")
+    p.add_argument("--title")
+    _add_common(p)
+    p.set_defaults(func=cmd_learn)
+
+    p = sub.add_parser("answer", help="quick answer: instant if already learned, else one specialist (then learned)")
+    p.add_argument("question", nargs="+")
+    p.add_argument("--fresh", action="store_true", help="ignore learned answers and work it out again")
+    p.add_argument("--depth", choices=list(DEPTH_PRESETS))
+    p.add_argument("--language")
+    p.add_argument("--quiet", action="store_true")
+    _add_common(p)
+    p.set_defaults(func=cmd_answer)
+
+    p = sub.add_parser("learned", help="show learned answers (or find the closest to a query); --forget ID")
+    p.add_argument("query", nargs="*")
+    p.add_argument("--forget", type=int, metavar="ID")
+    _add_common(p)
+    p.set_defaults(func=cmd_learned)
+
+    p = sub.add_parser("train", help="optional: fine-tune a local model on the system's own verified work")
+    tsub = p.add_subparsers(dest="train_cmd", required=True)
+    for name, helptext in [("status", "show the current student model and dataset"),
+                           ("dataset", "build SFT / preference datasets from traces and experience"),
+                           ("practice", "self-set and solve practice problems; verified ones become training data"),
+                           ("run", "LoRA-train a base model on the dataset and export it to Ollama"),
+                           ("eval", "score the current backend on the held-out set"),
+                           ("auto", "full cycle: practice -> dataset -> train -> eval -> adopt if better")]:
+        tp = tsub.add_parser(name, help=helptext)
+        tp.add_argument("--base", help="base model: Hugging Face id or local directory")
+        tp.add_argument("--name", default="omniresearch-student", help="Ollama name for the trained model")
+        tp.add_argument("--domains", nargs="*", help="domain ids to practise (default: all)")
+        tp.add_argument("--per-domain", type=int, default=2)
+        tp.add_argument("--difficulty", default="moderate")
+        tp.add_argument("--max-problems", type=int)
+        tp.add_argument("--epochs", type=float, default=2.0)
+        tp.add_argument("--max-examples", type=int)
+        tp.add_argument("--rounds", type=int, default=1)
+        tp.add_argument("--limit", type=int, default=40)
+        tp.add_argument("--depth", choices=list(DEPTH_PRESETS))
+        tp.add_argument("--quiet", action="store_true")
+        _add_common(tp)
+    p.set_defaults(func=cmd_train)
+
+    p = sub.add_parser("feedback", help="guide the agent: feedback is recalled on every future run")
     p.add_argument("text", nargs="+")
     p.add_argument("--session", help="session id the feedback refers to")
     _add_common(p)

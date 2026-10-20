@@ -45,6 +45,8 @@ class Solution:
     elapsed: float
     learned: dict = field(default_factory=dict)
     output_path: Path | None = None
+    attempt_history: list[dict] = field(default_factory=list)
+    backend: str = ""
 
 
 class ProblemSolver:
@@ -107,11 +109,21 @@ class ProblemSolver:
             "deliverable": str(data.get("deliverable") or "a correct, complete, verified solution"),
         }
 
-    def solve(self, problem: str, *, save: bool = True) -> Solution:
+    def solve(self, problem: str, *, save: bool = True, fresh: bool = False) -> Solution:
         started = time.time()
         problem = problem.strip()
         self._emit("start", question=problem, backend=self.backend.describe(), online=self.orch.online,
                    depth=self.config.depth)
+        if self.config.instant_recall and not fresh:
+            hit = self.orch.learner.recall(problem, min_similarity=self.config.recall_similarity)
+            if hit:
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(hit["created"]))
+                self._emit("instant_recall", similarity=hit["similarity"], learned_at=when)
+                answer = (f"{hit['answer']}\n\n_(answered instantly from what I learned on {when}; similarity "
+                          f"{hit['similarity']:.2f}. Use --fresh to solve it again.)_")
+                return Solution(self.orch.session_id, problem, hit["question"], "recalled", "instant_recall", answer,
+                                hit["confidence"], 0, {}, {}, [], hit["sources"], time.time() - started,
+                                backend=self.backend.describe())
         klass = self.classify(problem)
         self._emit("classified", **klass)
 
@@ -133,13 +145,18 @@ class ProblemSolver:
 
         solution = Solution(self.orch.session_id, problem, klass["restated"], klass["type"], klass["strategy"],
                             result.content, result.confidence, result.attempts, result.thinking, result.verification,
-                            result.tool_calls, result.sources, time.time() - started)
+                            result.tool_calls, result.sources, time.time() - started,
+                            attempt_history=result.attempt_history, backend=self.backend.describe())
         if self.config.reflect:
             self._emit("phase", name="reflecting & learning")
             reflector = Reflector(self.backend, self.orch.experience)
             solution.learned = reflector.reflect(problem, trace_for_reflection([result]), result.content,
                                                  session=self.orch.session_id)
             self._emit("learned", **{k: v for k, v in solution.learned.items() if k != "error"})
+        trustworthy = result.confidence is None or result.confidence >= self.config.min_confidence
+        if trustworthy and result.content and not result.content.startswith("(model error"):
+            self.orch.learner.remember(problem, result.content, confidence=result.confidence, sources=result.sources,
+                                       session=self.orch.session_id)
         if save:
             solution.output_path = self._save(solution)
         self._emit("done", elapsed=solution.elapsed, path=str(solution.output_path or ""))
@@ -161,5 +178,6 @@ class ProblemSolver:
             "strategy": sol.strategy, "confidence": sol.confidence, "attempts": sol.attempts,
             "thinking": sol.thinking, "verification": sol.verification, "tool_calls": sol.tool_calls,
             "sources": sol.sources, "learned": sol.learned, "elapsed": round(sol.elapsed, 1),
+            "attempt_history": sol.attempt_history, "backend": sol.backend, "kind": "solve",
         }, ensure_ascii=False, indent=1), encoding="utf-8")
         return md

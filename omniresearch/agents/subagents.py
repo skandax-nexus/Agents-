@@ -10,11 +10,11 @@ from ..cognition.thinking import ThinkingAgent
 from .prompts import (ANALYST_ROLE, CRITIC_FORMAT, CRITIC_ROLE, PLANNER_FORMAT, PLANNER_ROLE, SCOUT_ROLE,
                       SPECIALIST_ROLE, SYNTHESIZER_ROLE, base_system)
 
-LEARNING_TOOLS = ("experience_recall", "skill_search", "skill_save", "lesson_save")
+LEARNING_TOOLS = ("experience_recall", "skill_search", "skill_save", "lesson_save", "learn", "recall_answer")
 RESEARCH_TOOLS = ("knowledge_search", "knowledge_read", "memory_recall", "memory_save", "read_file", "list_dir",
                   "python", "web_search", "web_fetch", "wikipedia") + LEARNING_TOOLS
 SCOUT_TOOLS = ("knowledge_search", "knowledge_read", "memory_recall", "read_file", "list_dir",
-               "web_search", "web_fetch", "wikipedia", "experience_recall")
+               "web_search", "web_fetch", "wikipedia", "experience_recall", "learn", "recall_answer")
 ANALYST_TOOLS = ("python", "knowledge_search", "knowledge_read", "read_file") + LEARNING_TOOLS
 CRITIC_TOOLS = ("python", "knowledge_search", "memory_recall", "experience_recall")
 WRITER_TOOLS = ("knowledge_search", "knowledge_read", "python", "experience_recall")

@@ -15,8 +15,12 @@ Its agents work the way a careful person does: they **think** before acting (res
 problem, list knowns and unknowns, form hypotheses, pick a strategy, define success criteria),
 **act** with tools, **verify** their own answer and retry with a different approach when it
 fails, and **learn** from every run - lessons, facts and reusable skills are stored and recalled
-in later runs, and you can teach it directly with `omniresearch feedback`. See
-[docs/COGNITIVE_ARCHITECTURE.md](docs/COGNITIVE_ARCHITECTURE.md).
+in later runs. See [docs/COGNITIVE_ARCHITECTURE.md](docs/COGNITIVE_ARCHITECTURE.md).
+
+It **learns instantly**: teach it any text, file or page with `omniresearch learn`, guide it with
+`omniresearch feedback`, and every answer it verifies is remembered so a similar question is
+answered at once with no model call. Optionally, `omniresearch train` fine-tunes a local model on
+its own verified work. See [docs/SELF_TRAINING.md](docs/SELF_TRAINING.md).
 
 ```
 question
@@ -49,6 +53,10 @@ are needed for offline use; `pypdf` adds PDF indexing).
 | Command | What it does |
 |---|---|
 | `omniresearch ask "<question>"` | full multi-agent research run (`--depth quick\|standard\|deep`) |
+| `omniresearch learn "<text>" / --file PATH / --url URL` | teach it instantly; stored and searchable at once, no training |
+| `omniresearch answer "<question>"` | instant answer if already learned, otherwise one specialist (then learned). `--fresh` to redo |
+| `omniresearch learned [query]` | what it has learned to answer; `--forget ID` |
+| `omniresearch train practice\|dataset\|run\|eval\|auto\|status` | optional: fine-tune a local model on verified work (`pip install "omniresearch[train]"`) |
 | `omniresearch solve "<problem>"` | general problem solver: calculations, designs, decisions, troubleshooting, plans, puzzles, how-tos, code. Classifies the problem, picks a strategy, thinks, acts, verifies, learns |
 | `omniresearch feedback "<text>"` | teach it: feedback is recalled by every agent on future runs |
 | `omniresearch experience [query]` | what it has learned: lessons, facts, skills, feedback (`--kind`, `--forget ID`) |
@@ -167,13 +175,14 @@ package is the offline path.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q           # 30 tests, no model or network needed
+pytest -q           # 45 tests; the LoRA test runs on a toy model and is skipped without torch
 ```
 
 Layout: `omniresearch/llm` (backends), `omniresearch/domains` (registry + router),
 `omniresearch/tools` (offline/online tools), `omniresearch/agents` (protocol, base loop,
 sub-agents, orchestrator), `omniresearch/cognition` (thinking agent, experience store,
-reflector, problem solver), `omniresearch/cli.py`.
+reflector, instant learner, problem solver), `omniresearch/training` (dataset mining, self-practice,
+LoRA trainer, evaluation, self-training loop), `omniresearch/cli.py`.
 
 ## Notes
 
