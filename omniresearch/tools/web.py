@@ -38,12 +38,18 @@ def _get(url: str, timeout: float = 20.0, data: bytes | None = None) -> str:
         raise ToolError(f"Network error for {url}: {exc}") from exc
 
 
-def has_connectivity(timeout: float = 3.0) -> bool:
-    for host in ("duckduckgo.com", "en.wikipedia.org", "1.1.1.1"):
+def has_connectivity(timeout: float = 4.0) -> bool:
+    """True only if an actual HTTPS request succeeds (honours HTTPS_PROXY; a bare TCP connect
+    can succeed behind a proxy that then refuses the tunnel)."""
+    for url in ("https://duckduckgo.com/", "https://en.wikipedia.org/"):
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": _UA})
         try:
-            socket.create_connection((host, 443), timeout=timeout).close()
-            return True
-        except OSError:
+            with urllib.request.urlopen(req, timeout=timeout):  # noqa: S310
+                return True
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500:
+                return True  # the site answered, so the network path works
+        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError):
             continue
     return False
 
