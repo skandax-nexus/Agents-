@@ -23,6 +23,11 @@ class AgentResult:
     sources: list[str] = field(default_factory=list)
     elapsed: float = 0.0
     truncated: bool = False
+    # filled by ThinkingAgent (metacognition)
+    thinking: dict = field(default_factory=dict)
+    verification: dict = field(default_factory=dict)
+    confidence: float | None = None
+    attempts: int = 1
 
     def summary(self, limit: int = 4000) -> str:
         text = self.content

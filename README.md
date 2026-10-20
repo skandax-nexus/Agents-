@@ -11,6 +11,13 @@ interdisciplinary specialist instead of being refused.
 It runs entirely on your machine with a local model (Ollama or any llama.cpp / LM Studio /
 vLLM server), and can optionally use the Claude API and web tools when you are online.
 
+Its agents work the way a careful person does: they **think** before acting (restate the
+problem, list knowns and unknowns, form hypotheses, pick a strategy, define success criteria),
+**act** with tools, **verify** their own answer and retry with a different approach when it
+fails, and **learn** from every run - lessons, facts and reusable skills are stored and recalled
+in later runs, and you can teach it directly with `omniresearch feedback`. See
+[docs/COGNITIVE_ARCHITECTURE.md](docs/COGNITIVE_ARCHITECTURE.md).
+
 ```
 question
   └─ Main agent (ResearchOrchestrator)
@@ -42,7 +49,10 @@ are needed for offline use; `pypdf` adds PDF indexing).
 | Command | What it does |
 |---|---|
 | `omniresearch ask "<question>"` | full multi-agent research run (`--depth quick\|standard\|deep`) |
-| `omniresearch chat` | interactive session; `/research <q>` runs the full pipeline, plain text gets a quick specialist answer grounded in the last report |
+| `omniresearch solve "<problem>"` | general problem solver: calculations, designs, decisions, troubleshooting, plans, puzzles, how-tos, code. Classifies the problem, picks a strategy, thinks, acts, verifies, learns |
+| `omniresearch feedback "<text>"` | teach it: feedback is recalled by every agent on future runs |
+| `omniresearch experience [query]` | what it has learned: lessons, facts, skills, feedback (`--kind`, `--forget ID`) |
+| `omniresearch chat` | interactive session; `/research <q>` full pipeline, `/solve <p>` problem solver, `/feedback <t>` teach it, plain text gets a quick specialist answer |
 | `omniresearch index <paths...>` | index documents into the offline knowledge base (incremental) |
 | `omniresearch search "<terms>"` | query the knowledge base directly |
 | `omniresearch domains` | list the 70+ domains and categories |
@@ -90,16 +100,44 @@ environment variables (`OMNIRESEARCH_BACKEND`, `OMNIRESEARCH_MODEL`, `OMNIRESEAR
 
 Depth presets:
 
-| depth | sub-questions | tool steps / agent | critique rounds | domains |
-|---|---|---|---|---|
-| quick | 3 | 4 | 0 | 2 |
-| standard | 5 | 8 | 1 | 4 |
-| deep | 8 | 14 | 2 | 6 |
+| depth | sub-questions | tool steps / agent | critique rounds | domains | think before acting | self-verify | attempts |
+|---|---|---|---|---|---|---|---|
+| quick | 3 | 4 | 0 | 2 | no | no | 1 |
+| standard | 5 | 8 | 1 | 4 | yes | yes | 2 |
+| deep | 8 | 14 | 2 | 6 | yes | yes | 3 |
+
+Override the cognition switches independently: `deliberate`, `verify`, `max_attempts`,
+`min_confidence`, `reflect` in the config (or `OMNIRESEARCH_DELIBERATE=1` etc.).
+
+## How it thinks, learns and solves
+
+Every specialist, the analyst and the problem solver is a `ThinkingAgent`:
+
+1. **Recall** relevant lessons, facts, skills and your feedback from the experience store.
+2. **Deliberate**: restate the task, list knowns/unknowns/assumptions, generate hypotheses and
+   alternative strategies, choose one, write success criteria and risks.
+3. **Act**: the tool loop (search, read, compute, note).
+4. **Verify**: a reviewer pass checks the answer against the success criteria and the evidence
+   actually gathered, and gives a confidence score. Below the threshold, the agent retries with
+   the verifier's fix strategy (bounded attempts). Verifier notes are appended to the answer.
+5. **Reflect & learn**: after each run the Reflector stores lessons (method), facts (sourced
+   knowledge) and skills (reusable Python procedures). Agents can also save skills and lessons
+   themselves mid-task. Everything is offline, in `~/.omniresearch/experience.db`.
+
+`omniresearch solve` adds problem classification (research, calculation, design, decision,
+troubleshooting, planning, creative, logic, how-to, coding) and strategy selection
+(decomposition, first principles, analogy, working backwards, constraint analysis,
+simplify, trial-and-verification, inversion, simulation), and can call the whole research
+team as a tool when a problem needs evidence.
 
 ## Using it from Python
 
 ```python
-from omniresearch import ResearchOrchestrator, load_config
+from omniresearch import ProblemSolver, ResearchOrchestrator, load_config
+
+solver = ProblemSolver(load_config(depth="standard"))
+solution = solver.solve("Design a rainwater harvesting system for a 120 m2 roof in a 600 mm/yr climate")
+print(solution.answer, solution.confidence, solution.strategy)
 
 cfg = load_config(backend="ollama", model="qwen2.5:14b", depth="deep", online=False)
 agent = ResearchOrchestrator(cfg, on_event=lambda kind, data: print(kind, data))
@@ -121,7 +159,7 @@ agent.tools.add(Tool("tide_table", "Look up tide heights for a port and date",
 ## Claude Code sub-agents
 
 `.claude/agents/` contains the same team (orchestrator, domain specialist, source scout,
-analyst, critic, synthesizer) as Claude Code sub-agent definitions, so you can run
+analyst, critic, synthesizer, problem solver) as Claude Code sub-agent definitions, so you can run
 `@research-orchestrator <question>` from Claude Code when you are online. The Python
 package is the offline path.
 
@@ -129,12 +167,13 @@ package is the offline path.
 
 ```bash
 pip install -e ".[dev]"
-pytest -q           # 22 tests, no model or network needed
+pytest -q           # 30 tests, no model or network needed
 ```
 
 Layout: `omniresearch/llm` (backends), `omniresearch/domains` (registry + router),
 `omniresearch/tools` (offline/online tools), `omniresearch/agents` (protocol, base loop,
-sub-agents, orchestrator), `omniresearch/cli.py`.
+sub-agents, orchestrator), `omniresearch/cognition` (thinking agent, experience store,
+reflector, problem solver), `omniresearch/cli.py`.
 
 ## Notes
 

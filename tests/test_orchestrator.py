@@ -14,6 +14,18 @@ from omniresearch.tools.registry import build_tools
 def _handler(system: str, messages: list[ChatMessage]) -> str:
     """Role-aware fake model: returns a plan, tool calls, a critique or a report."""
     last = messages[-1].content
+    if system.startswith("You are the metacognition module"):
+        if last.startswith("Check this answer"):
+            return json.dumps({"passes": True, "confidence": 0.9, "problems": [], "unsupported_claims": [], "fix_strategy": ""})
+        return json.dumps({"understanding": "u", "hypotheses": ["h1"], "chosen_strategy": "search then compute",
+                           "success_criteria": ["has a number"], "difficulty": "moderate"})
+    if system.startswith("You are the reflection module"):
+        return json.dumps({"lessons": [{"title": "Search by region", "content": "Use region names in permafrost queries.",
+                                        "domains": "cryosphere"}],
+                           "facts": [{"title": "Permafrost carbon", "content": "~1500 GtC (local doc)", "domains": "cryosphere"}],
+                           "skills": [{"name": "gtc_to_gtco2", "description": "convert GtC to GtCO2",
+                                       "code": "def gtc_to_gtco2(x):\n    return x*44/12\nprint(gtc_to_gtco2(1))"}],
+                           "self_assessment": "fine"})
     if system.startswith("You are the research planner"):
         return json.dumps({
             "restated_question": "How much does thawing permafrost add to warming?",
@@ -73,6 +85,20 @@ def test_full_pipeline(tmp_path: Path):
     assert trace["plan"]["domains"] == ["cryosphere", "climate_science"]
     assert memory.count() == 1 and "1500 GtC" in memory.recent()[0]["content"]
     assert "plan" in events and "done" in events
+    # cognition: specialists deliberated and verified; the run was reflected on and learned from
+    spec = next(f for f in report.findings if f.agent == "specialist:cryosphere")
+    assert spec.thinking["chosen_strategy"] == "search then compute" and spec.confidence == 0.9 and spec.attempts == 1
+    assert "deliberation" in events and "verification" in events and "learned" in events
+    assert report.learned == {"lessons": 1, "facts": 1, "skills": 1, "self_assessment": "fine"}
+    stats = orch.experience.stats()
+    assert stats["lesson"] == 1 and stats["fact"] == 1 and stats["skill"] == 1
+    assert "gtc_to_gtco2" in tools.run("skill_search", query="convert GtC").output
+    # a second run sees the lesson in the planner's context
+    orch2 = ResearchOrchestrator(cfg, backend=ScriptedBackend(handler=_handler), tools=tools, kb=kb, memory=memory,
+                                 experience=orch.experience)
+    orch2.plan("permafrost carbon release")
+    planner_prompt = orch2.backend.calls[0][1][0].content
+    assert "Search by region" in planner_prompt
 
 
 def test_plan_fallback_on_garbage(tmp_path: Path):

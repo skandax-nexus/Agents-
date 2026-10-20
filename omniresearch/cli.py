@@ -37,6 +37,19 @@ def _print_event(kind: str, data: dict) -> None:
         print(f"  [{agent}] done in {data.get('steps')} step(s)" + (" (forced)" if data.get("forced") else ""))
     elif kind == "critique":
         print(f"  verdict: {data.get('verdict')} | follow-ups: {data.get('followups')}")
+    elif kind == "deliberation":
+        print(f"  [{agent}] thinking: {data.get('difficulty') or '?'} problem, {data.get('hypotheses', 0)} hypotheses; "
+              f"strategy: {str(data.get('strategy', ''))[:110]}")
+    elif kind == "verification":
+        print(f"  [{agent}] self-check: {'pass' if data.get('passes') else 'FAIL'} "
+              f"(confidence {data.get('confidence', 0):.2f}, {data.get('problems', 0)} problem(s))")
+    elif kind == "retry":
+        print(f"  [{agent}] retrying after attempt {data.get('attempt')}: {data.get('reason', '')[:120]}")
+    elif kind == "classified":
+        print(f"  type: {data.get('type')} | difficulty: {data.get('difficulty')} | strategy: {data.get('strategy')} - {data.get('why', '')}")
+    elif kind == "learned":
+        print(f"  learned: {data.get('lessons', 0)} lesson(s), {data.get('facts', 0)} fact(s), {data.get('skills', 0)} skill(s)"
+              + (f" | {data.get('self_assessment')}" if data.get("self_assessment") else ""))
     elif kind == "done":
         print(f"\n[omniresearch] finished in {data['elapsed']:.0f}s -> {data['path']}")
 
@@ -81,6 +94,66 @@ def cmd_ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_solve(args: argparse.Namespace) -> int:
+    from .cognition.solver import ProblemSolver
+
+    cfg = _config_from_args(args)
+    problem = " ".join(args.problem).strip()
+    if not problem:
+        print("Describe the problem to solve.", file=sys.stderr)
+        return 2
+    try:
+        solver = ProblemSolver(cfg, on_event=None if args.quiet else _print_event)
+    except LLMError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    sol = solver.solve(problem)
+    print("\n" + "=" * 78 + "\n")
+    print(f"# {sol.restated}\n")
+    print(sol.answer)
+    conf = f"{sol.confidence:.2f}" if sol.confidence is not None else "n/a"
+    print(f"\n[{sol.ptype} | {sol.strategy} | confidence {conf} | {sol.attempts} attempt(s)]")
+    if sol.output_path:
+        print(f"Saved: {sol.output_path}")
+    return 0
+
+
+def cmd_feedback(args: argparse.Namespace) -> int:
+    from .cognition.experience import Experience
+
+    cfg = _config_from_args(args)
+    cfg.ensure_dirs()
+    text = " ".join(args.text).strip()
+    if not text:
+        print("Give the feedback text, e.g. omniresearch feedback \"lead with numbers; shorter reports\"", file=sys.stderr)
+        return 2
+    exp = Experience(cfg.experience_db)
+    eid = exp.add_feedback(text, session=args.session or "")
+    print(f"Stored feedback #{eid}. It will be shown to the agents on future runs.")
+    return 0
+
+
+def cmd_experience(args: argparse.Namespace) -> int:
+    from .cognition.experience import Experience, KINDS
+
+    cfg = _config_from_args(args)
+    exp = Experience(cfg.experience_db)
+    if args.forget:
+        exp.delete(args.forget)
+        print(f"Deleted entry {args.forget}.")
+        return 0
+    stats = exp.stats()
+    print("Experience store: " + ", ".join(f"{k}={stats[k]}" for k in KINDS) + f" (total {stats['total']})")
+    query = " ".join(args.query)
+    rows = exp.recall(query, limit=20, kinds=[args.kind] if args.kind else None) if query else exp.recent(20, args.kind)
+    for r in rows:
+        print(f"\n#{r.id} [{r.kind}] {r.title}  (domains: {r.domains or '-'}, uses: {r.uses}, score: {r.score:g})\n"
+              f"  {r.content[:600]}")
+    if not rows:
+        print("(nothing learned yet - run `omniresearch ask` or `omniresearch solve`, or add `omniresearch feedback`)")
+    return 0
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     from .agents.orchestrator import ResearchOrchestrator
 
@@ -91,7 +164,8 @@ def cmd_chat(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"OmniResearch chat ({orchestrator.backend.describe()}, online={orchestrator.online}).")
-    print("Type a question for a quick answer, '/research <question>' for a full multi-agent run, '/quit' to exit.")
+    print("Type a question for a quick answer, '/research <q>' for a full multi-agent run, '/solve <problem>' for the "
+          "problem solver, '/feedback <text>' to teach it, '/quit' to exit.")
     last_report = None
     while True:
         try:
@@ -106,6 +180,15 @@ def cmd_chat(args: argparse.Namespace) -> int:
         if line.startswith("/research "):
             last_report = orchestrator.research(line[len("/research "):])
             print("\n" + last_report.report)
+            continue
+        if line.startswith("/solve "):
+            from .cognition.solver import ProblemSolver
+            sol = ProblemSolver(cfg, orchestrator, on_event=orchestrator.on_event).solve(line[len("/solve "):])
+            print("\n" + sol.answer)
+            continue
+        if line.startswith("/feedback "):
+            orchestrator.experience.add_feedback(line[len("/feedback "):], session=orchestrator.session_id)
+            print("noted - I will apply that from now on.")
             continue
         print("\n" + orchestrator.ask(line, last_report))
 
@@ -199,6 +282,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"Knowledge base: unavailable ({exc})")
     try:
+        from .cognition.experience import Experience
+        es = Experience(cfg.experience_db).stats()
+        print(f"Experience: {es['lesson']} lessons, {es['fact']} facts, {es['skill']} skills, {es['feedback']} feedback")
+    except Exception as exc:  # noqa: BLE001
+        print(f"Experience: unavailable ({exc})")
+    preset = cfg.preset()
+    print(f"Cognition: deliberate={bool(preset['deliberate'])} verify={bool(preset['verify'])} "
+          f"max_attempts={preset['max_attempts']} reflect={cfg.reflect}")
+    try:
         import pypdf  # noqa: F401
         print("PDF support: yes (pypdf)")
     except ImportError:
@@ -236,6 +328,27 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--quiet", action="store_true", help="only print the final report")
     _add_common(p)
     p.set_defaults(func=cmd_ask)
+
+    p = sub.add_parser("solve", help="solve any problem: calculation, design, decision, troubleshooting, plan, puzzle ...")
+    p.add_argument("problem", nargs="+")
+    p.add_argument("--depth", choices=list(DEPTH_PRESETS))
+    p.add_argument("--language")
+    p.add_argument("--quiet", action="store_true")
+    _add_common(p)
+    p.set_defaults(func=cmd_solve)
+
+    p = sub.add_parser("feedback", help="teach the agent: feedback is recalled on every future run")
+    p.add_argument("text", nargs="+")
+    p.add_argument("--session", help="session id the feedback refers to")
+    _add_common(p)
+    p.set_defaults(func=cmd_feedback)
+
+    p = sub.add_parser("experience", help="show what the agent has learned (lessons, facts, skills, feedback)")
+    p.add_argument("query", nargs="*")
+    p.add_argument("--kind", choices=["lesson", "fact", "skill", "feedback"])
+    p.add_argument("--forget", type=int, metavar="ID", help="delete an entry")
+    _add_common(p)
+    p.set_defaults(func=cmd_experience)
 
     p = sub.add_parser("chat", help="interactive session with the research agent")
     p.add_argument("--depth", choices=list(DEPTH_PRESETS))

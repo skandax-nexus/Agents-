@@ -6,16 +6,24 @@ from ..domains.registry import catalogue_text
 from ..llm import LLMBackend
 from ..tools import ToolRegistry
 from .base import Agent, EventHook
+from ..cognition.thinking import ThinkingAgent
 from .prompts import (ANALYST_ROLE, CRITIC_FORMAT, CRITIC_ROLE, PLANNER_FORMAT, PLANNER_ROLE, SCOUT_ROLE,
                       SPECIALIST_ROLE, SYNTHESIZER_ROLE, base_system)
 
+LEARNING_TOOLS = ("experience_recall", "skill_search", "skill_save", "lesson_save")
 RESEARCH_TOOLS = ("knowledge_search", "knowledge_read", "memory_recall", "memory_save", "read_file", "list_dir",
-                  "python", "web_search", "web_fetch", "wikipedia")
+                  "python", "web_search", "web_fetch", "wikipedia") + LEARNING_TOOLS
 SCOUT_TOOLS = ("knowledge_search", "knowledge_read", "memory_recall", "read_file", "list_dir",
-               "web_search", "web_fetch", "wikipedia")
-ANALYST_TOOLS = ("python", "knowledge_search", "knowledge_read", "read_file")
-CRITIC_TOOLS = ("python", "knowledge_search", "memory_recall")
-WRITER_TOOLS = ("knowledge_search", "knowledge_read", "python")
+               "web_search", "web_fetch", "wikipedia", "experience_recall")
+ANALYST_TOOLS = ("python", "knowledge_search", "knowledge_read", "read_file") + LEARNING_TOOLS
+CRITIC_TOOLS = ("python", "knowledge_search", "memory_recall", "experience_recall")
+WRITER_TOOLS = ("knowledge_search", "knowledge_read", "python", "experience_recall")
+
+
+def _cog(kwargs: dict) -> dict:
+    """Pull ThinkingAgent options out of a kwargs dict (all optional)."""
+    return {k: kwargs.pop(k) for k in ("deliberate", "verify", "max_attempts", "experience", "min_confidence")
+            if k in kwargs}
 
 
 class PlannerAgent(Agent):
@@ -30,15 +38,15 @@ class PlannerAgent(Agent):
         super().__init__("planner", system, backend, ToolRegistry(), max_steps=1, on_event=on_event)
 
 
-class SpecialistAgent(Agent):
+class SpecialistAgent(ThinkingAgent):
     def __init__(self, domain: Domain, backend: LLMBackend, tools: ToolRegistry, *, max_steps: int,
-                 language: str = "English", on_event: EventHook | None = None) -> None:
+                 language: str = "English", on_event: EventHook | None = None, **cog) -> None:
         role = SPECIALIST_ROLE.format(name=domain.name, category=domain.category, description=domain.description,
                                       methods=domain.methods, sources=domain.sources)
         system = base_system(f"the {domain.name} specialist", role, tools.subset(RESEARCH_TOOLS).spec_text(),
                              language=language)
         super().__init__(f"specialist:{domain.id}", system, backend, tools.subset(RESEARCH_TOOLS),
-                         max_steps=max_steps, on_event=on_event)
+                         max_steps=max_steps, on_event=on_event, domains=(domain.id,), **_cog(cog))
         self.domain = domain
 
 
@@ -50,12 +58,13 @@ class ScoutAgent(Agent):
         super().__init__("scout", system, backend, sub, max_steps=max_steps, on_event=on_event)
 
 
-class AnalystAgent(Agent):
+class AnalystAgent(ThinkingAgent):
     def __init__(self, backend: LLMBackend, tools: ToolRegistry, *, max_steps: int, language: str = "English",
-                 on_event: EventHook | None = None) -> None:
+                 on_event: EventHook | None = None, **cog) -> None:
         sub = tools.subset(ANALYST_TOOLS)
         system = base_system("the quantitative analyst", ANALYST_ROLE, sub.spec_text(), language=language)
-        super().__init__("analyst", system, backend, sub, max_steps=max_steps, on_event=on_event)
+        super().__init__("analyst", system, backend, sub, max_steps=max_steps, on_event=on_event,
+                         domains=("statistics", "mathematics"), **_cog(cog))
 
 
 class CriticAgent(Agent):

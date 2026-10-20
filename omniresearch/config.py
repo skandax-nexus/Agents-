@@ -20,9 +20,12 @@ DEFAULT_HOME = Path(os.environ.get("OMNIRESEARCH_HOME", Path.home() / ".omnirese
 
 DEPTH_PRESETS: dict[str, dict[str, int]] = {
     # quick: one pass, few tool steps.  deep: more sub-questions, more steps, a critique round.
-    "quick": {"max_subquestions": 3, "max_steps": 4, "critique_rounds": 0, "max_domains": 2},
-    "standard": {"max_subquestions": 5, "max_steps": 8, "critique_rounds": 1, "max_domains": 4},
-    "deep": {"max_subquestions": 8, "max_steps": 14, "critique_rounds": 2, "max_domains": 6},
+    "quick": {"max_subquestions": 3, "max_steps": 4, "critique_rounds": 0, "max_domains": 2,
+              "deliberate": 0, "verify": 0, "max_attempts": 1},
+    "standard": {"max_subquestions": 5, "max_steps": 8, "critique_rounds": 1, "max_domains": 4,
+                 "deliberate": 1, "verify": 1, "max_attempts": 2},
+    "deep": {"max_subquestions": 8, "max_steps": 14, "critique_rounds": 2, "max_domains": 6,
+             "deliberate": 1, "verify": 1, "max_attempts": 3},
 }
 
 
@@ -47,6 +50,13 @@ class Config:
     parallel_agents: int = 2
     language: str = "English"
 
+    # --- cognition (think / verify / learn) --------------------------------
+    deliberate: bool | None = None     # think before acting (None = follow depth preset)
+    verify: bool | None = None         # self-check answers and retry (None = follow depth preset)
+    reflect: bool = True               # learn lessons/facts/skills after every run
+    max_attempts: int | None = None    # retries after a failed self-check (None = preset)
+    min_confidence: float = 0.6        # below this a verified answer is retried
+
     # --- storage ----------------------------------------------------------
     home: Path = field(default_factory=lambda: DEFAULT_HOME)
     output_dir: Path = field(default_factory=lambda: Path("research_output"))
@@ -58,7 +68,18 @@ class Config:
     allow_python: bool = True
 
     def preset(self) -> dict[str, int]:
-        return DEPTH_PRESETS.get(self.depth, DEPTH_PRESETS["standard"])
+        base = dict(DEPTH_PRESETS.get(self.depth, DEPTH_PRESETS["standard"]))
+        if self.deliberate is not None:
+            base["deliberate"] = int(self.deliberate)
+        if self.verify is not None:
+            base["verify"] = int(self.verify)
+        if self.max_attempts is not None:
+            base["max_attempts"] = max(1, int(self.max_attempts))
+        return base
+
+    @property
+    def experience_db(self) -> Path:
+        return self.home / "experience.db"
 
     @property
     def knowledge_db(self) -> Path:
@@ -95,6 +116,10 @@ _ENV_MAP = {
     "OMNIRESEARCH_MAX_TOKENS": ("max_tokens", int),
     "OMNIRESEARCH_NUM_CTX": ("num_ctx", int),
     "OMNIRESEARCH_PARALLEL": ("parallel_agents", int),
+    "OMNIRESEARCH_DELIBERATE": ("deliberate", "bool"),
+    "OMNIRESEARCH_VERIFY": ("verify", "bool"),
+    "OMNIRESEARCH_REFLECT": ("reflect", "bool"),
+    "OMNIRESEARCH_MAX_ATTEMPTS": ("max_attempts", int),
 }
 
 
