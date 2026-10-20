@@ -1,0 +1,5 @@
+# Core offline use needs nothing beyond the Python standard library.
+# Optional extras:
+anthropic>=1.0    # online Claude API backend
+pypdf>=4.0        # PDF indexing
+pytest>=8.0       # tests

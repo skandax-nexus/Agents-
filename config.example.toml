@@ -1,0 +1,30 @@
+# Copy to ./config.toml or ~/.omniresearch/config.toml.  Every key is optional.
+# Environment variables OMNIRESEARCH_<KEY> (upper-case) override these values.
+
+# Model backend: "auto" tries Ollama, then any OpenAI-compatible local server, then the Claude API.
+backend = "auto"            # auto | ollama | openai | anthropic | mock
+# model = "qwen2.5:14b"     # backend-specific model name (Ollama tag, llama.cpp model id, Claude model id)
+
+ollama_url = "http://localhost:11434"
+openai_base_url = "http://localhost:8080/v1"   # llama.cpp llama-server, LM Studio, vLLM, LocalAI, Jan ...
+anthropic_model = "claude-opus-5-5"
+anthropic_effort = "high"                      # low | medium | high | xhigh | max
+
+temperature = 0.2
+max_tokens = 4096
+num_ctx = 16384             # context window to request from local models (raise for bigger models)
+
+# Research behaviour
+depth = "standard"          # quick | standard | deep
+# online = false            # true = force web tools on, false = strictly offline, unset = auto-detect
+parallel_agents = 2         # specialists run concurrently (keep at 1-2 for a single local GPU)
+language = "English"
+
+# Storage
+# home = "~/.omniresearch"            # knowledge.db, memory.db, python sandbox
+output_dir = "research_output"        # reports (.md) and traces (.trace.json)
+# kiwix_url = "http://localhost:8081" # optional offline Wikipedia served by kiwix-serve
+
+# Local code execution used by the analyst (not a security sandbox)
+allow_python = true
+python_timeout = 60

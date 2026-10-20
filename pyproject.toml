@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omniresearch"
+version = "0.1.0"
+description = "Offline-first multi-agent research system that covers every domain, from the sciences to all environmental fields."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = []
+
+[project.optional-dependencies]
+online = ["anthropic>=1.0"]
+pdf = ["pypdf>=4.0"]
+dev = ["pytest>=8.0"]
+all = ["anthropic>=1.0", "pypdf>=4.0", "pytest>=8.0"]
+
+[project.scripts]
+omniresearch = "omniresearch.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["omniresearch*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
