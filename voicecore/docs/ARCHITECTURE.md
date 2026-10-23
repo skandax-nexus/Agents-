@@ -15,9 +15,15 @@ vocabulary of words, only a vocabulary of sounds learned from the audio itself.
 - Residual vector quantisation: `n_codebooks` codebooks (default 4 × 1024). Each frame
   becomes 4 integers. EMA codebook updates, dead-code re-seeding, commitment loss.
 - Decoder: mirror of the encoder with transposed convolutions.
-- Loss: L1 waveform + multi-resolution log-STFT, spectral convergence and log-mel terms.
-  Self-supervised: the target is the input. (A GAN discriminator, as in EnCodec, would
-  sharpen output and is the natural next step.)
+- Loss: waveform MSE (dominant; frames are time-aligned so this is a strong signal from step
+  one) plus a small multi-resolution spectral term (scale-free linear-magnitude L1 and clamped
+  log-mel L1). Measured on this architecture, a large log-spectral weight collapses early
+  training toward silence and codebook collapse, so the spectral weight is 0.1 and its
+  gradients are bounded. Self-supervised: the target is the input. (A GAN discriminator, as
+  in EnCodec, would sharpen output and is the natural next step.)
+- Anti-collapse: data-dependent codebook init from the first batch, l2-normalised (cosine)
+  codes, and re-seeding of any code unused for 10 steps. Quality metrics: SNR, log-mel
+  distance, and codes in use.
 
 ### 2. Speech language model (`voicecore/lm`) - learning the structure of speech
 - Decoder-only transformer over codec frames. Each frame's codes are embedded (one table

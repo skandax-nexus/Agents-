@@ -15,7 +15,10 @@ class CodecConfig:
     codebook_size: int = 1024
     ema_decay: float = 0.99
     commitment: float = 0.25
-    dead_code_threshold: int = 2       # usage count below which a code is re-seeded
+    dead_code_steps: int = 10          # a code unused for this many steps is re-seeded from the batch
+    vq_cosine: bool = True             # l2-normalised codes and latents (prevents codebook collapse)
+    vq_center: bool = False            # subtract an EMA mean from latents before quantising (measured: no gain)
+    weight_norm: bool = True           # weight-normalised convolutions (EnCodec-style)
 
     @property
     def hop(self) -> int:
@@ -44,9 +47,9 @@ class LMConfig:
 class TrainConfig:
     batch_size: int = 8
     segment_seconds: float = 2.0
-    lr_codec: float = 3e-4
+    lr_codec: float = 1e-3
     lr_lm: float = 3e-4
-    grad_clip: float = 1.0
+    grad_clip: float = 10.0
     device: str = "auto"
     seed: int = 0
 

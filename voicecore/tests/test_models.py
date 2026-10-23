@@ -42,10 +42,13 @@ def test_codec_learns_to_reconstruct(cfg):
         corpus.add_array(proto_speech(3.0, seed=s))
     codec = AudioCodec(cfg.codec)
     tr = CodecTrainer(codec, cfg)
-    before = tr.evaluate_snr(corpus)
-    tr.train(corpus, 60, log_every=1000)
-    after = tr.evaluate_snr(corpus)
-    assert after > before + 1.0, (before, after)
+    before = tr.evaluate(corpus)
+    tr.train(corpus, 200, log_every=1000)
+    after = tr.evaluate(corpus)
+    assert after["mel_distance"] < before["mel_distance"] - 0.5, (before, after)   # timbre is being learned
+    assert after["snr_db"] > before["snr_db"] + 1.0, (before, after)                 # and the waveform itself
+    # codebook usage plateaus at 2-4 codes for the first ~150 steps and then diversifies; no total collapse
+    assert min(after["codes_used"]) >= 2 and max(after["codes_used"]) >= 8, after
 
 
 def test_dead_codes_get_reseeded(cfg):
@@ -54,7 +57,7 @@ def test_dead_codes_get_reseeded(cfg):
     for _ in range(5):
         codec(torch.randn(2, 8000) * 0.1)
     usage = codec.rvq.layers[0].usage
-    assert float(usage.min()) > 0   # every code was either used or re-seeded
+    assert float(usage.max()) < cfg.codec.dead_code_steps   # every code was used recently or re-seeded
 
 
 def test_lm_forward_loss_generate(cfg):

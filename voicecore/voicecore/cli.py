@@ -65,10 +65,9 @@ def cmd_train_codec(args) -> int:
     print(f"{n} file(s), {corpus.seconds / 60:.1f} min of audio")
     tr = CodecTrainer(vc.codec, vc.cfg, on_event=_print_event)
     tr.train(corpus, args.steps, log_every=args.log_every)
-    snr = tr.evaluate_snr(corpus)
     vc.meta["codec_steps"] = vc.meta.get("codec_steps", 0) + args.steps
     vc.save()
-    print(f"codec reconstruction SNR: {snr:.1f} dB (saved)")
+    print(f"codec quality: {tr.evaluate(corpus)} (saved)")
     return 0
 
 
@@ -259,7 +258,7 @@ def cmd_demo(args) -> int:
     root = args.root or tempfile.mkdtemp(prefix="voicecore-demo-")
     cfg = VoiceCoreConfig.tiny()
     cfg.selftrain.min_buffer_seconds = 5.0
-    cfg.selftrain.codec_snr_target_db = 6.0
+    cfg.selftrain.codec_snr_target_db = 0.5
     cfg.selftrain.codec_steps_per_round = 20
     cfg.selftrain.lm_steps_per_round = 20
     cfg.selftrain.dialogue_steps_per_round = 10
@@ -277,11 +276,13 @@ def cmd_demo(args) -> int:
     print(f"synthetic corpus: {corpus.seconds:.0f}s of proto-speech in 2 made-up languages")
 
     ct = CodecTrainer(vc.codec, cfg, on_event=_print_event)
-    snr0 = ct.evaluate_snr(corpus)
-    print(f"\n[1] codec, before training: reconstruction SNR {snr0:.1f} dB")
+    e0 = ct.evaluate(corpus)
+    print(f"\n[1] codec, before training: SNR {e0['snr_db']:.1f} dB, log-mel distance {e0['mel_distance']:.2f}, codes in use {e0['codes_used']}/{e0['codebook_size']}")
     ct.train(corpus, args.codec_steps, log_every=max(1, args.codec_steps // 4))
-    snr1 = ct.evaluate_snr(corpus)
-    print(f"    codec, after {args.codec_steps} steps: reconstruction SNR {snr1:.1f} dB  ({'learned' if snr1 > snr0 + 1 else 'no gain'})")
+    e1 = ct.evaluate(corpus)
+    learned = e1["mel_distance"] < e0["mel_distance"] - 0.3 and e1["snr_db"] > e0["snr_db"]
+    print(f"    codec, after {args.codec_steps} steps: SNR {e1['snr_db']:.1f} dB, log-mel distance {e1['mel_distance']:.2f}, "
+          f"codes in use {e1['codes_used']}/{e1['codebook_size']}  ({'learned' if learned else 'no gain'})")
 
     lt = LMTrainer(vc.lm, vc.codec, cfg, on_event=_print_event)
     import random

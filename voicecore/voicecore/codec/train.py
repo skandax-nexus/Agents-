@@ -9,7 +9,7 @@ import torch
 from ..audio.features import snr_db
 from ..config import VoiceCoreConfig
 from ..data import AudioCorpus
-from .losses import codec_loss
+from .losses import codec_loss, mel_distance
 from .model import AudioCodec
 
 
@@ -53,12 +53,18 @@ class CodecTrainer:
         return last
 
     @torch.no_grad()
-    def evaluate_snr(self, corpus: AudioCorpus, n: int = 8, seed: int = 123) -> float:
+    def evaluate(self, corpus: AudioCorpus, n: int = 8, seed: int = 123) -> dict:
+        """Reconstruction quality on a fixed sample: SNR (phase-aligned), log-mel distance, codebook usage."""
         self.codec.eval()
         rng = random.Random(seed)
         batch = corpus.sample_batch(n, self.cfg.train.segment_seconds, rng).to(self.device)
-        recon, _, _ = self.codec(batch)
-        return snr_db(batch, recon)
+        recon, codes, _ = self.codec(batch)
+        used = [int(torch.unique(codes[:, q]).numel()) for q in range(codes.shape[1])]
+        return {"snr_db": round(snr_db(batch, recon), 2), "mel_distance": round(mel_distance(batch, recon, self.cfg.codec.sample_rate), 3),
+                "codes_used": used, "codebook_size": self.cfg.codec.codebook_size}
+
+    def evaluate_snr(self, corpus: AudioCorpus, n: int = 8, seed: int = 123) -> float:
+        return self.evaluate(corpus, n, seed)["snr_db"]
 
     def save(self, path: Path) -> None:
         torch.save({"state": self.codec.state_dict(), "step": self.step_no}, path)

@@ -91,9 +91,12 @@ class SelfTrainer:
 
         # 1. codec
         self.codec_trainer.train(corpus, self.sc.codec_steps_per_round, seed=self.state["rounds"])
-        snr = self.codec_trainer.evaluate_snr(corpus)
-        self.state["codec_snr"] = round(snr, 2)
-        report["codec_snr_db"] = self.state["codec_snr"]
+        quality = self.codec_trainer.evaluate(corpus)
+        snr = quality["snr_db"]
+        self.state["codec_snr"] = snr
+        self.state["codec_mel_distance"] = quality["mel_distance"]
+        report["codec_snr_db"] = snr
+        report["codec_mel_distance"] = quality["mel_distance"]
         if snr < self.sc.codec_snr_target_db and self.state["stage"] == "codec":
             self.state["rounds"] += 1
             report["note"] = f"codec stage: SNR {snr:.1f} dB < target {self.sc.codec_snr_target_db} dB"
