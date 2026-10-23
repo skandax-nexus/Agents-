@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voicecore"
+version = "0.1.0"
+description = "A from-scratch, self-trained voice-to-voice core: neural audio codec + speech language model + continual self-training, no pretrained models, language-agnostic by construction."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = ["numpy>=1.24", "torch>=2.1"]
+
+[project.optional-dependencies]
+mic = ["sounddevice>=0.4"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+voicecore = "voicecore.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["voicecore*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
