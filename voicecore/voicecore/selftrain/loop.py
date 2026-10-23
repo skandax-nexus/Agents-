@@ -91,6 +91,7 @@ class SelfTrainer:
 
         # 1. codec
         self.codec_trainer.train(corpus, self.sc.codec_steps_per_round, seed=self.state["rounds"])
+        self.engine.mark_codec_trained(self.sc.codec_steps_per_round)
         quality = self.codec_trainer.evaluate(corpus)
         snr = quality["snr_db"]
         self.state["codec_snr"] = snr
@@ -149,8 +150,9 @@ class SelfTrainer:
             report["dialogue_loss"] = self.state["dialogue_loss"]
             report["exchanges_used"] = len(rows)
 
-        # 5. clusters are adapted when audio is first heard (hear / respond); re-observing stored clips would
-        #    collapse the split threshold, so only report the count here
+        # 5. voice/language map: re-cluster all stored fingerprints (keeps the current number of clusters)
+        if len(self.engine.clusters.fingerprints) >= 4:
+            self.engine.clusters.refit()
         report["voice_clusters"] = len(self.engine.clusters.counts)
         self.state["rounds"] += 1
         return self._finish(report, started)

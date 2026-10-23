@@ -28,7 +28,7 @@ from .selftrain.buffer import ExperienceBuffer
 
 
 FINGERPRINT_MELS = 40
-FINGERPRINT_DIM = 3 * FINGERPRINT_MELS
+FINGERPRINT_DIM = 3 * FINGERPRINT_MELS            # acoustic (DSP) fingerprint, used before the codec has trained
 
 
 class VoiceCore:
@@ -43,13 +43,20 @@ class VoiceCore:
         torch.manual_seed(cfg.train.seed)
         self.codec = AudioCodec(cfg.codec).to(self.device)
         self.lm = SpeechLM(cfg.lm, cfg.codec).to(self.device)
-        self.clusters = VoiceClusters(FINGERPRINT_DIM)
-        self.buffer = ExperienceBuffer(self.root / "experience", cfg.codec.sample_rate)
         self.meta = {"created": time.time(), "codec_steps": 0, "lm_steps": 0, "exchanges": 0}
+        self.clusters = VoiceClusters(self.fingerprint_dim)
+        self.buffer = ExperienceBuffer(self.root / "experience", cfg.codec.sample_rate)
         self._load_weights()          # raises before anything on disk is touched if cfg and weights disagree
         cfg.save(cfg_path)
 
     # -- persistence ------------------------------------------------------------------------------
+    def mark_codec_trained(self, steps: int) -> None:
+        """Record codec training; the first time, switch the cluster space to the codec fingerprint."""
+        was = self.codec_trained
+        self.meta["codec_steps"] = int(self.meta.get("codec_steps", 0)) + int(steps)
+        if not was and self.codec_trained:
+            self.clusters = VoiceClusters(self.fingerprint_dim)
+
     def _load_weights(self) -> None:
         cp = self.root / "codec.pt"
         lp = self.root / "lm.pt"
@@ -57,15 +64,19 @@ class VoiceCore:
             self.codec.load_state_dict(torch.load(cp, map_location=self.device)["state"])
         if lp.exists():
             self.lm.load_state_dict(torch.load(lp, map_location=self.device)["state"])
-        vc = self.root / "clusters.json"
-        if vc.exists():
-            self.clusters = VoiceClusters.load(vc)
         mp = self.root / "meta.json"
         if mp.exists():
             try:
                 self.meta.update(json.loads(mp.read_text()))
             except (OSError, ValueError):
                 pass
+        vc = self.root / "clusters.json"
+        if vc.exists():
+            loaded = VoiceClusters.load(vc)
+            if loaded.dim == self.fingerprint_dim:
+                self.clusters = loaded
+            else:
+                self.clusters = VoiceClusters(self.fingerprint_dim)   # fingerprint space changed; start over
 
     def save(self) -> None:
         torch.save({"state": self.codec.state_dict()}, self.root / "codec.pt")
@@ -81,6 +92,14 @@ class VoiceCore:
     def sr(self) -> int:
         return self.cfg.codec.sample_rate
 
+    @property
+    def codec_trained(self) -> bool:
+        return int(self.meta.get("codec_steps", 0)) > 0
+
+    @property
+    def fingerprint_dim(self) -> int:
+        return 2 * self.cfg.codec.latent_dim if self.codec_trained else FINGERPRINT_DIM
+
     # -- perception --------------------------------------------------------------------------------
     def _prepare(self, wav: np.ndarray, sr: int | None = None) -> np.ndarray:
         """Mono float32 at the engine sample rate."""
@@ -93,9 +112,14 @@ class VoiceCore:
         return torch.from_numpy(self._prepare(wav, sr)).to(self.device).unsqueeze(0)
 
     def fingerprint(self, wav: np.ndarray, sr: int | None = None) -> np.ndarray:
-        """Acoustic fingerprint of an utterance: level-normalised spectral shape, per-band spread and per-band
-        flux over the voiced frames (pitch, timbre, sound inventory, articulation rate).  Pure signal
-        processing, so voice/language discovery works before anything is trained."""
+        """Fingerprint of an utterance for voice/language discovery.
+
+        Once the codec has trained, its latent (mean and spread over time) is used: measured on real
+        recordings it separates speakers better than any hand-built feature.  Before that, an acoustic
+        fingerprint (level-normalised spectral shape, per-band spread and flux over voiced frames) is used
+        so discovery works from the first utterance."""
+        if self.codec_trained:
+            return self.codec.fingerprint(self._tensor(wav, sr))[0].cpu().numpy()
         m = log_mel(self._tensor(wav, sr), self.sr, 1024, 256, FINGERPRINT_MELS)[0]       # (mels, frames)
         level = m.mean(0)
         active = level > level.median()                                                    # drop silent frames

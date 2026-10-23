@@ -75,7 +75,7 @@ def cmd_train_codec(args) -> int:
     print(f"{n} file(s), {corpus.seconds / 60:.1f} min of audio")
     tr = CodecTrainer(vc.codec, vc.cfg, on_event=_print_event)
     tr.train(corpus, args.steps, log_every=args.log_every)
-    vc.meta["codec_steps"] = vc.meta.get("codec_steps", 0) + args.steps
+    vc.mark_codec_trained(args.steps)
     vc.save()
     print(f"codec quality: {tr.evaluate(corpus)} (saved)")
     return 0
@@ -231,11 +231,15 @@ def cmd_status(args) -> int:
 
 def cmd_langs(args) -> int:
     vc = _engine(args)
+    if args.refit:
+        print("refit:", vc.clusters.refit(args.refit))
+        vc.save_light()
     rows = vc.clusters.summary()
     if not rows:
-        print("no voices/languages discovered yet - let it hear some speech")
+        print("no voices/languages discovered yet - let it hear some speech, then `voicecore langs ROOT --refit K`")
     for r in rows:
         print(f"  {r['id']:>3}  {r['name']:<16} {r['utterances']} utterance(s)")
+    print(f"  ({len(vc.clusters.fingerprints)} fingerprints stored; fingerprint = {'trained codec latent' if vc.codec_trained else 'acoustic'})")
     return 0
 
 
@@ -291,6 +295,7 @@ def cmd_demo(args) -> int:
     e0 = ct.evaluate(corpus)
     print(f"\n[1] codec, before training: SNR {e0['snr_db']:.1f} dB, log-mel distance {e0['mel_distance']:.2f}, codes in use {e0['codes_used']}/{e0['codebook_size']}")
     ct.train(corpus, args.codec_steps, log_every=max(1, args.codec_steps // 4))
+    vc.mark_codec_trained(args.codec_steps)
     e1 = ct.evaluate(corpus)
     learned = e1["mel_distance"] < e0["mel_distance"] - 0.3 and e1["snr_db"] > e0["snr_db"]
     print(f"    codec, after {args.codec_steps} steps: SNR {e1['snr_db']:.1f} dB, log-mel distance {e1['mel_distance']:.2f}, "
@@ -308,10 +313,14 @@ def cmd_demo(args) -> int:
 
     print(f"\n[3] voice-to-voice: hear an utterance in each language, reply in audio")
     for lang in (0, 1):
+        for seed in (97, 98):
+            vc.hear(proto_speech(1.0, seed=seed, language=lang, speaker=1.0 + 0.4 * lang))
+    print(f"    refit into 2 clusters from {len(vc.clusters.fingerprints)} heard utterances: {vc.clusters.refit(2)}")
+    for lang in (0, 1):
         utter = proto_speech(1.0, seed=99, language=lang, speaker=1.0 + 0.4 * lang)
         info = vc.converse(utter, max_seconds=1.0)
         print(f"    language {lang}: heard 1.0s -> {info['cluster_name']}, replied {info['reply_seconds']:.2f}s of audio")
-    print(f"    discovered voice/language clusters: {vc.clusters.summary()}")
+    print(f"    voice/language clusters: {vc.clusters.summary()}")
 
     print(f"\n[4] one self-training round (codec + lm + self-play + dialogue)")
     st = SelfTrainer(vc, on_event=_print_event)
@@ -352,7 +361,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("root"); s.add_argument("--rounds", type=int, default=1); s.add_argument("--audio", nargs="*", help="extra recordings")
     s.set_defaults(func=cmd_selftrain)
     s = sub.add_parser("status"); s.add_argument("root"); s.set_defaults(func=cmd_status)
-    s = sub.add_parser("langs", help="discovered voice/language clusters"); s.add_argument("root"); s.set_defaults(func=cmd_langs)
+    s = sub.add_parser("langs", help="discovered voice/language clusters"); s.add_argument("root")
+    s.add_argument("--refit", type=int, metavar="K", help="re-cluster all stored fingerprints into K groups")
+    s.set_defaults(func=cmd_langs)
     s = sub.add_parser("name", help="label a cluster"); s.add_argument("root"); s.add_argument("cluster", type=int); s.add_argument("label")
     s.set_defaults(func=cmd_name)
     s = sub.add_parser("feedback", help="rate a reply: +1 / -1"); s.add_argument("root"); s.add_argument("exchange_id"); s.add_argument("value")

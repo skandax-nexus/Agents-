@@ -108,14 +108,35 @@ def test_voice_clusters_discover_two_languages(tmp_path):
         vc.hear(proto_speech(3.0, seed=seed, language=0, speaker=1.0))
     for seed in range(4):
         vc.hear(proto_speech(3.0, seed=seed, language=1, speaker=1.8))
-    ids_a = {vc.clusters.identify(vc.fingerprint(proto_speech(3.0, seed=9, language=0, speaker=1.0)))}
-    ids_b = {vc.clusters.identify(vc.fingerprint(proto_speech(3.0, seed=9, language=1, speaker=1.8)))}
-    assert len(vc.clusters.counts) >= 2 and ids_a != ids_b
-    vc.clusters.name(0, "lang-A")
-    assert vc.clusters.label(0) == "lang-A" and vc.clusters.label(None) == "unknown"
+    assert len(vc.clusters.fingerprints) == 8 and len(vc.clusters.counts) == 1      # one cluster until a refit
+    info = vc.clusters.refit(2)
+    assert info["clusters"] == 2 and sum(info["sizes"]) == 8
+    first, second = vc.clusters.assignments[:4], vc.clusters.assignments[4:]
+    maj_a, maj_b = max(set(first), key=first.count), max(set(second), key=second.count)
+    assert maj_a != maj_b and first.count(maj_a) + second.count(maj_b) >= 6      # at most one mis-grouped utterance
+    a = vc.clusters.identify(vc.fingerprint(proto_speech(3.0, seed=9, language=0, speaker=1.0)))
+    b = vc.clusters.identify(vc.fingerprint(proto_speech(3.0, seed=9, language=1, speaker=1.8)))
+    assert a != b and a == maj_a and b == maj_b
+    vc.clusters.name(a, "lang-A")
+    assert vc.clusters.label(a) == "lang-A" and vc.clusters.label(None) == "unknown"
+    vc.clusters.refit(2)                                   # names survive a refit
+    assert "lang-A" in vc.clusters.names.values()
     vc.save()
     loaded = VoiceClusters.load(tmp_path / "vc" / "clusters.json")
-    assert loaded.names[0] == "lang-A" and loaded.dim == FINGERPRINT_DIM and loaded._n_in == vc.clusters._n_in
+    assert loaded.dim == FINGERPRINT_DIM and len(loaded.fingerprints) == 8 and "lang-A" in loaded.names.values()
+
+
+def test_fingerprint_switches_to_codec_after_training(tmp_path):
+    vc = _engine(tmp_path)
+    vc.hear(proto_speech(1.0, seed=1))
+    assert vc.fingerprint_dim == FINGERPRINT_DIM
+    vc.mark_codec_trained(10)
+    assert vc.codec_trained and vc.fingerprint_dim == 2 * vc.cfg.codec.latent_dim
+    assert vc.clusters.dim == vc.fingerprint_dim and len(vc.clusters.fingerprints) == 0   # fresh space
+    vc.hear(proto_speech(1.0, seed=2))
+    vc.save()
+    vc2 = VoiceCore(tmp_path / "vc")
+    assert vc2.codec_trained and vc2.clusters.dim == 2 * vc.cfg.codec.latent_dim and len(vc2.clusters.fingerprints) == 1
 
 
 def test_self_training_round(tmp_path):
