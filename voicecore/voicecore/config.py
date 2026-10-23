@@ -85,6 +85,13 @@ class VoiceCoreConfig:
                    train=TrainConfig(batch_size=4, segment_seconds=1.0))
 
     @classmethod
+    def cpu(cls) -> "VoiceCoreConfig":
+        """Trainable on a few CPU cores in under an hour on a small real-speech corpus (minutes of audio)."""
+        return cls(codec=CodecConfig(channels=16, latent_dim=64, n_codebooks=4, codebook_size=256),
+                   lm=LMConfig(d_model=192, n_layers=4, n_heads=4, d_ff=768, max_frames=512, style_dim=32),
+                   train=TrainConfig(batch_size=8, segment_seconds=1.0))
+
+    @classmethod
     def small(cls) -> "VoiceCoreConfig":
         """A laptop-trainable size for real recordings (hours of audio, a GPU helps)."""
         return cls(codec=CodecConfig(channels=32, latent_dim=128, n_codebooks=4, codebook_size=1024),

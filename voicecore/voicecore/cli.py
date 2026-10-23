@@ -40,7 +40,8 @@ def _engine(args: argparse.Namespace, cfg=None):
 
 def _preset(name: str):
     from .config import VoiceCoreConfig
-    return {"tiny": VoiceCoreConfig.tiny, "small": VoiceCoreConfig.small, "default": VoiceCoreConfig}[name]()
+    return {"tiny": VoiceCoreConfig.tiny, "cpu": VoiceCoreConfig.cpu, "small": VoiceCoreConfig.small,
+            "default": VoiceCoreConfig}[name]()
 
 
 def cmd_init(args) -> int:
@@ -326,7 +327,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("init", help="create an engine with random weights")
-    s.add_argument("root"); s.add_argument("--preset", choices=["tiny", "small", "default"], default="default")
+    s.add_argument("root"); s.add_argument("--preset", choices=["tiny", "cpu", "small", "default"], default="default")
     s.add_argument("--force", action="store_true", help="discard an existing engine in this directory")
     s.set_defaults(func=cmd_init)
     for name, fn, helptext in [("train-codec", cmd_train_codec, "self-supervised codec training on raw audio"),

@@ -51,10 +51,41 @@ discovered as separate clusters, voice-to-voice replies in each, and a self-trai
 Measured on 4 CPU cores with the `tiny` preset and 60 s of audio: log-mel distance 3.96 to
 2.66 after 400 codec steps, speech-model loss 4.2 to 1.05 after 200 steps.
 
+### Training on real recordings
+
+Any wav files work (8/16/24/32-bit, mono or stereo, any rate; everything is resampled to
+16 kHz mono). Three presets: `tiny` (tests/demo), `cpu` (a few CPU cores, minutes of audio,
+under an hour), `small` (hours of audio, a GPU helps).
+
+No recordings at hand? Two sources that need nothing but a network connection:
+
+```bash
+# 3,000 real recordings of spoken digits by six speakers (Free Spoken Digit Dataset, 8 kHz)
+mkdir -p data/fsdd && cd data/fsdd
+for d in 0 1 2 3 4 5 6 7 8 9; do for s in jackson nicolas theo yweweler george lucas; do for i in $(seq 0 49); do
+  curl -sfO "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/master/recordings/${d}_${s}_${i}.wav"
+done; done; done; cd ../..
+
+# a multilingual supplement from the offline espeak-ng synthesizer (synthetic, but real phoneme sequences)
+pip install espeakng-loader
+python3 scripts/espeak_corpus.py data/espeak --languages en hi es de fr ja ar sw --per-language 30
+```
+
+Then:
+
+```bash
+voicecore init ~/vc --preset cpu
+voicecore train-codec ~/vc data/fsdd data/espeak --steps 3000     # ~20 min on 4 cores
+voicecore train-lm    ~/vc data/fsdd data/espeak --steps 2000     # ~3 min
+voicecore selftrain   ~/vc --rounds 2 --audio data/fsdd
+voicecore roundtrip   ~/vc data/fsdd/7_jackson_0.wav seven_roundtrip.wav
+voicecore talk        ~/vc data/fsdd/7_jackson_0.wav reply.wav
+```
+
 With your own recordings (any language, 16 kHz mono wav is best; anything is resampled):
 
 ```bash
-voicecore init ~/vc --preset small
+voicecore init ~/vc --preset small                        # or --preset cpu without a GPU
 voicecore train-codec ~/vc ~/recordings --steps 20000     # self-supervised: learn to hear
 voicecore train-lm    ~/vc ~/recordings --steps 20000     # self-supervised: learn the structure of speech
 voicecore train-dialogue ~/vc ~/conversations --steps 5000  # optional: turns split on silence -> (heard, reply)
