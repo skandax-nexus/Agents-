@@ -32,6 +32,8 @@ def mel_filterbank(sr: int, n_fft: int, n_mels: int, fmin: float = 20.0, fmax: f
 def stft_mag(x: torch.Tensor, n_fft: int, hop: int) -> torch.Tensor:
     """|STFT| of (B, T) -> (B, n_fft//2+1, frames)."""
     window = torch.hann_window(n_fft, device=x.device)
+    if x.shape[-1] <= n_fft // 2:          # reflect padding needs more than n_fft//2 samples
+        x = torch.nn.functional.pad(x, (0, n_fft // 2 + 1 - x.shape[-1]))
     spec = torch.stft(x, n_fft=n_fft, hop_length=hop, win_length=n_fft, window=window, return_complex=True,
                       center=True, pad_mode="reflect")
     return spec.abs()

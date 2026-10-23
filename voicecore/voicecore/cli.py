@@ -16,6 +16,8 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
 from . import __version__
 
 
@@ -42,6 +44,13 @@ def _preset(name: str):
 
 
 def cmd_init(args) -> int:
+    root = Path(args.root).expanduser()
+    if (root / "config.json").exists() and not args.force:
+        print(f"{root} already holds an engine; use --force to re-initialise it with random weights", file=sys.stderr)
+        return 1
+    if args.force:
+        for name in ("codec.pt", "lm.pt", "clusters.json", "meta.json", "selftrain_state.json"):
+            (root / name).unlink(missing_ok=True)
     vc = _engine(args, _preset(args.preset))
     vc.save()
     st = vc.status()
@@ -131,6 +140,7 @@ def cmd_talk(args) -> int:
     vc = _engine(args)
     started = time.time()
     reply = vc.respond_file(args.input, args.output, learn=not args.no_learn)
+    vc.save_light()
     print(f"replied with {len(reply) / vc.sr:.2f}s of audio in {time.time() - started:.1f}s -> {args.output}")
     return 0
 
@@ -155,7 +165,6 @@ def cmd_listen(args) -> int:
     except ImportError:
         print("pip install sounddevice  (microphone support)", file=sys.stderr)
         return 1
-    import numpy as np
     from .audio.vad import rms_energy
 
     vc = _engine(args)
@@ -166,7 +175,8 @@ def cmd_listen(args) -> int:
     silent_for = 0.0
     thr = args.threshold
     try:
-        with sd.InputStream(samplerate=sr, channels=1, dtype="float32", blocksize=frame) as stream:
+        with sd.InputStream(samplerate=sr, channels=1, dtype="float32", blocksize=frame) as stream, \
+                sd.OutputStream(samplerate=sr, channels=1, dtype="float32") as out:
             while True:
                 block, _ = stream.read(frame)
                 x = block[:, 0].copy()
@@ -179,18 +189,20 @@ def cmd_listen(args) -> int:
                     silent_for += len(x) / sr
                     if silent_for >= args.silence:
                         utter = np.concatenate(buf)
+                        speech_seconds = len(utter) / sr - silent_for     # exclude the trailing silence
                         buf, silent_for = [], 0.0
-                        if len(utter) / sr < 0.3:
+                        if speech_seconds < 0.3:
                             continue
-                        info = vc.hear(utter)
-                        print(f"  heard {info['seconds']:.1f}s [{info['cluster_name']}] - replying...")
-                        chunks = []
-                        reply = vc.respond(utter, on_chunk=lambda c: (chunks.append(c), sd.play(c, sr)))
-                        sd.wait()
-                        print(f"  said {len(reply) / sr:.1f}s")
+                        print(f"  heard {speech_seconds:.1f}s - replying...")
+                        # one respond() call hears, clusters, replies and stores the exchange exactly once;
+                        # chunks are written to a single output stream so playback is gapless
+                        info = vc.converse(utter, on_chunk=lambda c: out.write(np.ascontiguousarray(c[:, None])))
+                        print(f"  [{info['cluster_name']}] said {info['reply_seconds']:.1f}s"
+                              + (f"  (exchange {info['exchange_id']}: rate it with `voicecore feedback`)" if info['exchange_id'] else ""))
     except KeyboardInterrupt:
         print("\nstopped")
-    vc.save()
+    finally:
+        vc.save()
     return 0
 
 
@@ -245,7 +257,6 @@ def cmd_demo(args) -> int:
     """Everything from scratch on synthetic proto-speech in two 'languages': shows the codec learning to
     hear, the LM learning structure, replies matching the input's cluster, and a self-training round."""
     import tempfile
-    import numpy as np
     import torch
     from .audio.features import snr_db
     from .codec.train import CodecTrainer
@@ -297,9 +308,8 @@ def cmd_demo(args) -> int:
     print(f"\n[3] voice-to-voice: hear an utterance in each language, reply in audio")
     for lang in (0, 1):
         utter = proto_speech(1.0, seed=99, language=lang, speaker=1.0 + 0.4 * lang)
-        info = vc.hear(utter)
-        reply = vc.respond(utter, max_seconds=1.0)
-        print(f"    language {lang}: heard {info['seconds']:.1f}s -> {info['cluster_name']}, replied {len(reply) / vc.sr:.2f}s of audio")
+        info = vc.converse(utter, max_seconds=1.0)
+        print(f"    language {lang}: heard 1.0s -> {info['cluster_name']}, replied {info['reply_seconds']:.2f}s of audio")
     print(f"    discovered voice/language clusters: {vc.clusters.summary()}")
 
     print(f"\n[4] one self-training round (codec + lm + self-play + dialogue)")
@@ -317,6 +327,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("init", help="create an engine with random weights")
     s.add_argument("root"); s.add_argument("--preset", choices=["tiny", "small", "default"], default="default")
+    s.add_argument("--force", action="store_true", help="discard an existing engine in this directory")
     s.set_defaults(func=cmd_init)
     for name, fn, helptext in [("train-codec", cmd_train_codec, "self-supervised codec training on raw audio"),
                                ("train-lm", cmd_train_lm, "speech LM training on raw audio (no transcripts)")]:

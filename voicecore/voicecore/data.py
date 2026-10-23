@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import math
 import random
+import sys
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -38,14 +40,15 @@ class AudioCorpus:
             self.clips.append(x)
             self.names.append(name)
 
-    def add_files(self, paths: list[str | Path]) -> int:
+    def add_files(self, paths: list[str | Path], *, verbose: bool = True) -> int:
         n = 0
         for p in list_audio(paths):
             try:
                 self.add_array(load_audio(p, self.sr), str(p))
                 n += 1
-            except (OSError, ValueError):
-                continue
+            except (OSError, ValueError, wave.Error, EOFError) as exc:
+                if verbose:
+                    print(f"  skipped {p}: {exc}", file=sys.stderr)
         return n
 
     @property
@@ -60,11 +63,17 @@ class AudioCorpus:
         out = np.zeros((batch, n), dtype=np.float32)
         for i in range(batch):
             clip = rng.choices(self.clips, weights=weights, k=1)[0]
-            if len(clip) <= n:
-                out[i, : len(clip)] = clip
-            else:
+            if len(clip) > n:
                 s = rng.randrange(0, len(clip) - n)
                 out[i] = clip[s : s + n]
+                continue
+            # short clip: fill the segment with further random clips instead of digital silence
+            pos = 0
+            while pos < n:
+                take = min(len(clip), n - pos)
+                out[i, pos : pos + take] = clip[:take]
+                pos += take
+                clip = rng.choices(self.clips, weights=weights, k=1)[0]
         return torch.from_numpy(out)
 
 

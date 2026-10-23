@@ -8,7 +8,7 @@ Round structure (``SelfTrainer.round()``):
                         practice exchanges
   4. dialogue update  - train on kept self-play exchanges, real exchanges, and user-approved replies
                         (positive feedback up-weighted, negative excluded)
-  5. voice clusters   - refresh the unsupervised language/voice map
+  5. voice clusters   - report the unsupervised language/voice map (adapted as audio is heard)
 
 A curriculum gate keeps the LM from training on garbage: the codec must reach a reconstruction SNR
 target first.  All of it is offline and needs nothing pretrained.
@@ -122,7 +122,7 @@ class SelfTrainer:
             cands.sort(key=lambda t: t[0], reverse=True)
             n_keep = max(1, int(round(len(cands) * self.sc.keep_fraction)))
             for s, reply in cands[:n_keep]:
-                if s > -1e8:
+                if s > -1e8 and len(reply) >= self.engine.codec.hop:
                     self.buffer.add_exchange(heard, reply, score=s, origin="self-play")
                     kept += 1
         report["self_play_kept"] = kept
@@ -137,17 +137,20 @@ class SelfTrainer:
                 pairs, weights = [], []
                 for r in batch_rows:
                     h, s = self.buffer.load_exchange(r)
+                    if len(h) < self.engine.codec.hop or len(s) < self.engine.codec.hop:
+                        continue
                     pairs.append((h[: int(self.cfg.max_response_seconds * sr)], s[: int(self.cfg.max_response_seconds * sr)]))
                     fb = r.get("feedback") or 0
                     weights.append(3.0 if fb > 0 else (1.0 if r.get("origin") == "live" else 0.7))
+                if not pairs:
+                    continue
                 d_loss = self.lm_trainer.step_exchanges(pairs, weights)
             self.state["dialogue_loss"] = round(d_loss, 4)
             report["dialogue_loss"] = self.state["dialogue_loss"]
             report["exchanges_used"] = len(rows)
 
-        # 5. clusters
-        for clip in clips[:50]:
-            self.engine.clusters.observe(self.engine.fingerprint(clip))
+        # 5. clusters are adapted when audio is first heard (hear / respond); re-observing stored clips would
+        #    collapse the split threshold, so only report the count here
         report["voice_clusters"] = len(self.engine.clusters.counts)
         self.state["rounds"] += 1
         return self._finish(report, started)

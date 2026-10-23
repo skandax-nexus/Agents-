@@ -52,12 +52,44 @@ def test_codec_learns_to_reconstruct(cfg):
 
 
 def test_dead_codes_get_reseeded(cfg):
+    cfg.codec.dead_code_steps = 3
     codec = AudioCodec(cfg.codec)
     codec.train()
+    vq = codec.rvq.layers[0]
+    codec(torch.randn(2, 8000) * 0.1)
+    assert bool(vq.initialised)                       # data-dependent init happened on the first forward
+    seeded = vq.embed.clone()
+    # a batch that always maps to the same few codes leaves the rest unused -> re-seeded after 3 steps
+    same = torch.sin(torch.linspace(0, 100, 8000)).repeat(2, 1) * 0.1
     for _ in range(5):
-        codec(torch.randn(2, 8000) * 0.1)
-    usage = codec.rvq.layers[0].usage
-    assert float(usage.max()) < cfg.codec.dead_code_steps   # every code was used recently or re-seeded
+        codec(same)
+    assert float(vq.usage.max()) < cfg.codec.dead_code_steps
+    assert not torch.allclose(vq.embed, seeded)       # unused codes were moved
+    # init never re-runs, even on a much larger batch
+    before = vq.embed.clone()
+    codec(torch.randn(8, 16000) * 0.1)
+    assert int(vq.initialised) == 1 and (vq.embed - before).abs().max() < 1.0
+
+
+def test_inference_helpers_do_not_touch_codebooks(cfg):
+    codec = AudioCodec(cfg.codec)
+    codec.train()                                      # as left behind by CodecTrainer.step
+    codec(torch.randn(2, 8000) * 0.1)
+    step_before = int(codec.rvq.layers[0].step)
+    embed_before = codec.rvq.layers[0].embed.clone()
+    wav = torch.randn(1, 8000) * 0.1
+    a = codec.encode(wav); codec.decode(a); codec.embed(wav); codec.fingerprint(wav)
+    b = codec.encode(wav)
+    assert torch.equal(a, b) and int(codec.rvq.layers[0].step) == step_before
+    assert torch.equal(codec.rvq.layers[0].embed, embed_before) and codec.training
+    assert not torch.isnan(codec.fingerprint(torch.randn(1, 320))).any()   # single frame
+
+
+def test_short_inputs_do_not_crash():
+    from voicecore.audio.features import log_mel
+    from voicecore.codec.losses import mel_distance
+    assert log_mel(torch.randn(1, 300), 16000).shape[0] == 1
+    assert mel_distance(torch.randn(1, 400), torch.randn(1, 400), 16000) >= 0
 
 
 def test_lm_forward_loss_generate(cfg):
@@ -69,10 +101,11 @@ def test_lm_forward_loss_generate(cfg):
     assert logits.shape == (2, cfg.codec.n_codebooks, 51, lm.special.vocab)
     loss = lm.loss(codes, style)
     loss.backward()
-    assert 0 < float(loss) < 10
+    assert 0 < loss.item() < 10
     out = generate(lm, codes[:, :, :5], style, max_new_frames=12, top_k=8)
     assert out.shape[:2] == (2, cfg.codec.n_codebooks) and out.shape[-1] <= 12
     assert int(out.max()) < cfg.codec.codebook_size
+    assert len(generate.last_lengths) == 2 and all(0 <= n <= out.shape[-1] for n in generate.last_lengths)
     chunks = []
     generate(lm, codes[:1, :, :5], style[:1], max_new_frames=10, chunk_callback=chunks.append, chunk_frames=4)
     assert sum(c.shape[-1] for c in chunks) <= 10 and len(chunks) >= 2
@@ -108,3 +141,12 @@ def test_lm_learns_structure(cfg):
     l2 = tr.step_exchanges([(h, r)], weights=[2.0])
     assert l1 > 0 and l2 > 0
     assert isinstance(tr.exchange_logprob(h, r), float)
+    # empty replies are skipped, never crash
+    import math
+    assert math.isnan(tr.step_exchanges([(h, np.zeros(0, dtype=np.float32))]))
+    assert tr.exchange_logprob(h, np.zeros(0, dtype=np.float32)) == -1e9
+    # a heard utterance longer than the context is tail-truncated so the reply is still scored
+    long_h = proto_speech(8.0, seed=9)                       # 400 frames > max_frames 256
+    lp_a = tr.exchange_logprob(long_h, r)
+    lp_b = tr.exchange_logprob(long_h, proto_speech(0.6, seed=10))
+    assert lp_a != lp_b

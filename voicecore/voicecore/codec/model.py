@@ -90,12 +90,16 @@ class VectorQuantizer(nn.Module):
         """x: (N, dim) -> (quantised (N, dim) with straight-through grad, codes (N,))."""
         xn = self._prep(x)
         flat = xn.detach()
-        if self.training and not bool(self.initialised) and flat.shape[0] >= self.size:
-            # data-dependent init: seed every code from a real latent so all codes start in-distribution
-            idx = torch.randperm(flat.shape[0], device=flat.device)[: self.size]
-            self.embed.copy_(flat[idx])
-            self.ema_sum.copy_(flat[idx])
-            self.ema_count.fill_(1.0)
+        if self.training and not bool(self.initialised):
+            # Data-dependent init, decided once at the very first training forward: seed as many codes as the
+            # batch has frames from real latents (the rest keep their random init and are re-seeded by the
+            # dead-code rule).  Never re-run later: that would wipe a trained codebook and remap every token.
+            n_seed = min(self.size, flat.shape[0])
+            if n_seed > 0:
+                idx = torch.randperm(flat.shape[0], device=flat.device)[:n_seed]
+                self.embed[:n_seed] = flat[idx]
+                self.ema_sum[:n_seed] = flat[idx]
+                self.ema_count.fill_(1.0)
             self.initialised.fill_(True)
         dist = flat.pow(2).sum(1, keepdim=True) - 2 * flat @ self.embed.t() + self.embed.pow(2).sum(1)[None, :]
         codes = dist.argmin(dim=1)
@@ -118,8 +122,7 @@ class VectorQuantizer(nn.Module):
                 self.ema_sum[dead] = replacement
                 self.ema_count[dead] = 1.0
                 self.last_used[dead] = self.step
-        quant_st = xn + (quant - xn).detach()
-        return quant_st, codes
+        return quant, codes
 
     def lookup(self, codes: torch.Tensor) -> torch.Tensor:
         return self.embed[codes]
@@ -154,7 +157,11 @@ class ResidualVQ(nn.Module):
         return x - self.running_mean
 
     def forward(self, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """z: (B, D, F) -> (quantised (B, D, F), codes (B, n_q, F), commitment loss)."""
+        """z: (B, D, F) -> (quantised (B, D, F), codes (B, n_q, F), commitment loss).
+
+        A straight-through path is kept per codebook, so the encoder's reconstruction gradient is scaled
+        by n_codebooks.  This is deliberate: measured on this architecture, a single straight-through
+        path (gradient x1) leaves the codec stuck in its early few-codes plateau far longer."""
         B, D, Fr = z.shape
         x = self._centered(z.permute(0, 2, 1).reshape(-1, D))
         residual = x
@@ -163,8 +170,9 @@ class ResidualVQ(nn.Module):
         commit = torch.zeros((), device=z.device)
         for vq in self.layers:
             q, codes = vq(residual)
-            commit = commit + F.mse_loss(vq._prep(residual), q.detach())
-            out = out + q
+            xn = vq._prep(residual)
+            commit = commit + F.mse_loss(xn, q.detach())
+            out = out + xn + (q - xn).detach()
             residual = residual - q.detach()
             all_codes.append(codes.view(B, Fr))
         quant = out.view(B, Fr, D).permute(0, 2, 1)
@@ -204,24 +212,42 @@ class AudioCodec(nn.Module):
         recon = self.decoder(quant)
         return recon[..., : wav.shape[-1]], codes, commit
 
-    @torch.no_grad()
-    def encode(self, wav: torch.Tensor) -> torch.Tensor:
-        """wav (B, T) -> codes (B, n_q, F)."""
-        _, codes, _ = self.rvq(self.encoder(self.pad(wav)))
-        return codes
+    class _inference:
+        """Context manager: no grad and eval mode (so EMA codebooks are never touched), restoring the mode after."""
 
-    @torch.no_grad()
+        def __init__(self, module: nn.Module) -> None:
+            self.module = module
+
+        def __enter__(self):
+            self.was_training = self.module.training
+            self.module.eval()
+            self.ctx = torch.no_grad()
+            self.ctx.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            self.ctx.__exit__(*exc)
+            self.module.train(self.was_training)
+            return False
+
+    def encode(self, wav: torch.Tensor) -> torch.Tensor:
+        """wav (B, T) -> codes (B, n_q, F).  Never updates the codebooks."""
+        with self._inference(self):
+            _, codes, _ = self.rvq(self.encoder(self.pad(wav)))
+            return codes
+
     def decode(self, codes: torch.Tensor) -> torch.Tensor:
         """codes (B, n_q, F) -> wav (B, F * hop)."""
-        return self.decoder(self.rvq.decode_codes(codes))
+        with self._inference(self):
+            return self.decoder(self.rvq.decode_codes(codes))
 
-    @torch.no_grad()
     def embed(self, wav: torch.Tensor) -> torch.Tensor:
         """Mean-pooled continuous latent (B, D): conditions the speech LM on voice/language/prosody."""
-        return self.encoder(self.pad(wav)).mean(dim=-1)
+        with self._inference(self):
+            return self.encoder(self.pad(wav)).mean(dim=-1)
 
-    @torch.no_grad()
     def fingerprint(self, wav: torch.Tensor) -> torch.Tensor:
-        """Mean and spread of the latent over time (B, 2D): richer than `embed`, used for voice/language clustering."""
-        z = self.encoder(self.pad(wav))
-        return torch.cat([z.mean(dim=-1), z.std(dim=-1)], dim=1)
+        """Mean and spread of the latent over time (B, 2D)."""
+        with self._inference(self):
+            z = self.encoder(self.pad(wav))
+            return torch.cat([z.mean(dim=-1), z.std(dim=-1, unbiased=False)], dim=1)

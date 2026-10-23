@@ -46,7 +46,8 @@ def split_on_silence(x: np.ndarray, sr: int, *, min_silence: float = 0.4, min_ut
     out = []
     pad_s = int(pad * sr)
     for s, e_ in spans:
-        a, b = max(0, s * hop - pad_s), min(len(x), e_ * hop + frame + pad_s)
-        if (b - a) / sr >= min_utterance:
-            out.append((a, b))
+        raw_a, raw_b = s * hop, (e_ - 1) * hop + frame          # unpadded speech span
+        if (raw_b - raw_a) / sr < min_utterance:
+            continue
+        out.append((max(0, raw_a - pad_s), min(len(x), raw_b + pad_s)))
     return out

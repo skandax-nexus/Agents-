@@ -13,12 +13,17 @@ def generate(model: SpeechLM, prompt: torch.Tensor, style: torch.Tensor, *, max_
     """Autoregressively continue `prompt` (B, n_q, F). Returns only the new frames (B, n_q, F_new).
 
     chunk_callback(new_frames_tensor) is called every `chunk_frames` frames so audio can be streamed.
+    For batched prompts, rows that hit EOS early emit code 0 until the whole batch stops; their real
+    lengths are available afterwards in ``generate.last_lengths``.
     """
     model.eval()
     sp = model.special
     seq = prompt
     produced = []
     since_cb = 0
+    B = prompt.shape[0]
+    done = torch.zeros(B, dtype=torch.bool, device=prompt.device)
+    lengths = torch.zeros(B, dtype=torch.long, device=prompt.device)
     for _ in range(max_new_frames):
         if seq.shape[-1] >= model.cfg.max_frames:
             seq = seq[:, :, -model.cfg.max_frames + 1:]
@@ -36,9 +41,13 @@ def generate(model: SpeechLM, prompt: torch.Tensor, style: torch.Tensor, *, max_
             probs = F.softmax(logits, dim=-1)
             B, n_q, V = probs.shape
             nxt = torch.multinomial(probs.view(-1, V), 1).view(B, n_q)
-        if stop_at_eos and bool((nxt[:, 0] == sp.eos).all()):
-            break
+        if stop_at_eos:
+            done = done | (nxt[:, 0] == sp.eos)
+            if bool(done.all()):
+                break
         nxt = nxt.masked_fill(nxt >= sp.base, 0)   # a stray special id in a lower codebook: treat as code 0
+        nxt = nxt.masked_fill(done.unsqueeze(1), 0)   # finished rows emit silence code until the batch stops
+        lengths += (~done).long()
         produced.append(nxt.unsqueeze(-1))
         seq = torch.cat([seq, nxt.unsqueeze(-1)], dim=-1)
         since_cb += 1
@@ -48,5 +57,8 @@ def generate(model: SpeechLM, prompt: torch.Tensor, style: torch.Tensor, *, max_
     if chunk_callback is not None and since_cb:
         chunk_callback(torch.cat(produced[-since_cb:], dim=-1))
     if not produced:
-        return prompt[:, :, :0]
-    return torch.cat(produced, dim=-1)
+        out = prompt[:, :, :0]
+    else:
+        out = torch.cat(produced, dim=-1)
+    generate.last_lengths = lengths.tolist()   # per-row number of real frames (rows may finish early)
+    return out

@@ -12,8 +12,10 @@ from ..audio.io import read_wav, write_wav
 
 
 class ExperienceBuffer:
+    """Paths in the index are stored relative to the buffer root, so the engine directory can move."""
+
     def __init__(self, root: Path, sr: int) -> None:
-        self.root = Path(root)
+        self.root = Path(root).expanduser().resolve()
         self.sr = sr
         (self.root / "heard").mkdir(parents=True, exist_ok=True)
         (self.root / "said").mkdir(parents=True, exist_ok=True)
@@ -30,20 +32,24 @@ class ExperienceBuffer:
             fh.write(json.dumps(row) + "\n")
         return row
 
+    def _abs(self, rel: str) -> Path:
+        p = Path(rel)
+        return p if p.is_absolute() else self.root / p     # absolute entries from older indexes still work
+
     def add_heard(self, wav: np.ndarray, *, cluster: int | None = None, source: str = "mic") -> dict:
         uid = uuid.uuid4().hex[:10]
-        path = self.root / "heard" / f"{uid}.wav"
-        write_wav(path, wav, self.sr)
-        return self._append({"id": uid, "kind": "heard", "path": str(path), "seconds": len(wav) / self.sr,
+        rel = f"heard/{uid}.wav"
+        write_wav(self.root / rel, wav, self.sr)
+        return self._append({"id": uid, "kind": "heard", "path": rel, "seconds": len(wav) / self.sr,
                              "cluster": cluster, "source": source, "time": time.time()})
 
     def add_exchange(self, heard: np.ndarray, said: np.ndarray, *, score: float | None = None,
                      cluster: int | None = None, origin: str = "live") -> dict:
         uid = uuid.uuid4().hex[:10]
-        hp, sp = self.root / "heard" / f"{uid}.wav", self.root / "said" / f"{uid}.wav"
-        write_wav(hp, heard, self.sr)
-        write_wav(sp, said, self.sr)
-        return self._append({"id": uid, "kind": "exchange", "heard": str(hp), "said": str(sp),
+        hrel, srel = f"heard/{uid}.wav", f"said/{uid}.wav"
+        write_wav(self.root / hrel, heard, self.sr)
+        write_wav(self.root / srel, said, self.sr)
+        return self._append({"id": uid, "kind": "exchange", "heard": hrel, "said": srel,
                              "seconds": (len(heard) + len(said)) / self.sr, "score": score, "feedback": None,
                              "cluster": cluster, "origin": origin, "time": time.time()})
 
@@ -58,20 +64,33 @@ class ExperienceBuffer:
             self.index.write_text("".join(json.dumps(r) + "\n" for r in self.rows), encoding="utf-8")
         return hit
 
+    def _heard_rows(self) -> list[dict]:
+        """Audio that was genuinely heard: 'heard' rows and the heard side of live exchanges.  Self-play
+        exchanges re-use heard clips, so they are excluded to keep the corpus from filling with copies."""
+        rows = [r for r in self.rows if r["kind"] == "heard" or (r["kind"] == "exchange" and r.get("origin", "live") == "live")]
+        return sorted(rows, key=lambda r: r.get("time", 0.0))
+
     def heard_seconds(self) -> float:
-        return sum(r["seconds"] for r in self.rows if r["kind"] == "heard") + \
-            sum(r["seconds"] for r in self.rows if r["kind"] == "exchange")
+        total = 0.0
+        for r in self._heard_rows():
+            if r["kind"] == "heard":
+                total += r["seconds"]
+            else:
+                try:
+                    total += len(read_wav(self._abs(r["heard"]))[0]) / self.sr
+                except (OSError, ValueError, EOFError):
+                    continue
+        return total
 
     def heard_clips(self, limit: int | None = None) -> list[np.ndarray]:
-        paths = [r["path"] for r in self.rows if r["kind"] == "heard"] + \
-                [r["heard"] for r in self.rows if r["kind"] == "exchange"]
+        rows = self._heard_rows()
         if limit:
-            paths = paths[-limit:]
+            rows = rows[-limit:]          # most recent by time
         out = []
-        for p in paths:
+        for r in rows:
             try:
-                out.append(read_wav(p)[0])
-            except (OSError, ValueError):
+                out.append(read_wav(self._abs(r["path"] if r["kind"] == "heard" else r["heard"]))[0])
+            except (OSError, ValueError, EOFError):
                 continue
         return out
 
@@ -84,7 +103,7 @@ class ExperienceBuffer:
         return rows
 
     def load_exchange(self, row: dict) -> tuple[np.ndarray, np.ndarray]:
-        return read_wav(row["heard"])[0], read_wav(row["said"])[0]
+        return read_wav(self._abs(row["heard"]))[0], read_wav(self._abs(row["said"]))[0]
 
     def stats(self) -> dict:
         ex = [r for r in self.rows if r["kind"] == "exchange"]

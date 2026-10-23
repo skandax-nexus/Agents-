@@ -94,13 +94,23 @@ class LMTrainer:
         self.lm.train()
         items = []
         styles = []
-        for heard, reply in pairs:
+        kept_weights = []
+        hop = self.codec.hop
+        for i, (heard, reply) in enumerate(pairs):
+            if len(reply) < hop or len(heard) < hop:
+                continue   # nothing to learn from an empty side
             h = torch.as_tensor(heard, dtype=torch.float32, device=self.device).unsqueeze(0)
             r = torch.as_tensor(reply, dtype=torch.float32, device=self.device).unsqueeze(0)
             hc, style = tokenize(self.codec, h)
             rc, _ = tokenize(self.codec, r)
+            hc = self._fit_heard(hc, rc.shape[-1])
             items.append(build_exchange(self.lm, hc, rc))
             styles.append(style)
+            if weights:
+                kept_weights.append(weights[i])
+        if not items:
+            return float("nan")
+        weights = kept_weights if weights else None
         codes, mask = pad_batch(self.lm, items)
         style = torch.cat(styles, dim=0)
         if weights:
@@ -115,14 +125,30 @@ class LMTrainer:
             loss = self.lm.loss(codes, style, loss_mask=mask)
         return self._update(loss)
 
+    def _fit_heard(self, hc: torch.Tensor, reply_frames: int) -> torch.Tensor:
+        """Keep the tail of the heard tokens so [BOS] heard [SEP] reply [EOS] fits in max_frames."""
+        room = self.lm.cfg.max_frames - reply_frames - 3
+        if room < 1:
+            room = 1
+        return hc[:, :, -room:] if hc.shape[-1] > room else hc
+
     @torch.no_grad()
     def exchange_logprob(self, heard: torch.Tensor, reply: torch.Tensor) -> float:
-        """How plausible the model finds `reply` as an answer to `heard` (mean log-prob per code)."""
+        """How plausible the model finds `reply` as an answer to `heard` (mean log-prob per reply code).
+
+        Scores exactly the span training supervises (reply frames and EOS), keeping the tail of a long
+        heard utterance so the reply is always inside the context."""
         self.lm.eval()
+        hop = self.codec.hop
+        if len(reply) < hop or len(heard) < hop:
+            return -1e9
         h = torch.as_tensor(heard, dtype=torch.float32, device=self.device).unsqueeze(0)
         r = torch.as_tensor(reply, dtype=torch.float32, device=self.device).unsqueeze(0)
         hc, style = tokenize(self.codec, h)
         rc, _ = tokenize(self.codec, r)
+        max_reply = self.lm.cfg.max_frames - 4
+        if rc.shape[-1] > max_reply:
+            rc = rc[:, :, :max_reply]
+        hc = self._fit_heard(hc, rc.shape[-1])
         seq, _ = build_exchange(self.lm, hc, rc)
-        seq = seq[:, :, : self.lm.cfg.max_frames]
-        return float(self.lm.sequence_logprob(seq, style, from_frame=min(hc.shape[-1] + 1, seq.shape[-1] - 1))[0])
+        return float(self.lm.sequence_logprob(seq, style, from_frame=hc.shape[-1] + 2)[0])

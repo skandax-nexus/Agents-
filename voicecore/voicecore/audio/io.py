@@ -16,6 +16,10 @@ def read_wav(path: str | Path) -> tuple[np.ndarray, int]:
         raw = wf.readframes(wf.getnframes())
     if width == 2:
         data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    elif width == 3:   # 24-bit PCM (studio / field recorders)
+        b = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3).astype(np.int32)
+        i = b[:, 0] | (b[:, 1] << 8) | (b[:, 2].astype(np.int8).astype(np.int32) << 16)
+        data = i.astype(np.float32) / 8388608.0
     elif width == 4:
         data = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
     elif width == 1:

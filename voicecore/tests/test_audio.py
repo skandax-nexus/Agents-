@@ -14,6 +14,28 @@ def test_wav_roundtrip(tmp_path):
     assert sr == 16000 and y.shape == x.shape and np.abs(y - x).max() < 1e-3
 
 
+def test_wav_24bit_and_stereo(tmp_path):
+    import wave
+    x = np.array([0.5, -0.5, 0.25, -1.0], dtype=np.float32)
+    i = (x * 8388607).astype(np.int32)
+    raw = b"".join(int(v).to_bytes(3, "little", signed=True) for v in i)
+    with wave.open(str(tmp_path / "c.wav"), "wb") as wf:
+        wf.setnchannels(1); wf.setsampwidth(3); wf.setframerate(16000); wf.writeframes(raw)
+    y, sr = read_wav(tmp_path / "c.wav")
+    assert np.abs(y - x).max() < 1e-4
+    write_wav(tmp_path / "s.wav", np.stack([x, -x], axis=1), 16000)
+    y, _ = read_wav(tmp_path / "s.wav")
+    assert y.shape == (4, 2)
+
+
+def test_corpus_skips_bad_files(tmp_path, capsys):
+    (tmp_path / "bad.wav").write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt junk")
+    write_wav(tmp_path / "good.wav", proto_speech(0.5, seed=1), 16000)
+    c = AudioCorpus(16000)
+    assert c.add_files([tmp_path]) == 1
+    assert "skipped" in capsys.readouterr().err
+
+
 def test_resample_lengths():
     x = np.random.default_rng(0).standard_normal(44100).astype(np.float32)
     assert len(resample(x, 44100, 16000)) == 16000
@@ -38,6 +60,9 @@ def test_vad_splits_turns():
     spans = split_on_silence(x, sr, min_silence=0.4)
     assert len(spans) == 2
     assert all(0.5 < (b - a) / sr < 1.2 for a, b in spans)
+    # a 50 ms click is not an utterance, even with padding
+    click = np.concatenate([gap, speech[:800], gap])
+    assert split_on_silence(click, sr, min_silence=0.4) == []
 
 
 def test_proto_speech_and_corpus():
@@ -48,3 +73,8 @@ def test_proto_speech_and_corpus():
     import random
     batch = c.sample_batch(3, 0.5, random.Random(0))
     assert batch.shape == (3, 8000)
+    # clips shorter than the segment are filled with other clips, not silence
+    short = AudioCorpus(16000)
+    short.add_array(proto_speech(0.2, seed=5))
+    seg = short.sample_batch(1, 1.0, random.Random(0))
+    assert float(seg[0, 12000:].abs().max()) > 0

@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from .audio.features import log_mel
-from .audio.io import load_audio, resample, write_wav
+from .audio.io import load_audio, resample, to_mono, write_wav
 from .codec.model import AudioCodec
 from .codec.train import pick_device
 from .config import VoiceCoreConfig
@@ -33,13 +33,12 @@ FINGERPRINT_DIM = 3 * FINGERPRINT_MELS
 
 class VoiceCore:
     def __init__(self, root: str | Path, cfg: VoiceCoreConfig | None = None) -> None:
-        self.root = Path(root).expanduser()
+        self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         cfg_path = self.root / "config.json"
         if cfg is None:
             cfg = VoiceCoreConfig.load(cfg_path) if cfg_path.exists() else VoiceCoreConfig()
         self.cfg = cfg
-        cfg.save(cfg_path)
         self.device = pick_device(cfg.train.device)
         torch.manual_seed(cfg.train.seed)
         self.codec = AudioCodec(cfg.codec).to(self.device)
@@ -47,7 +46,8 @@ class VoiceCore:
         self.clusters = VoiceClusters(FINGERPRINT_DIM)
         self.buffer = ExperienceBuffer(self.root / "experience", cfg.codec.sample_rate)
         self.meta = {"created": time.time(), "codec_steps": 0, "lm_steps": 0, "exchanges": 0}
-        self._load_weights()
+        self._load_weights()          # raises before anything on disk is touched if cfg and weights disagree
+        cfg.save(cfg_path)
 
     # -- persistence ------------------------------------------------------------------------------
     def _load_weights(self) -> None:
@@ -70,6 +70,10 @@ class VoiceCore:
     def save(self) -> None:
         torch.save({"state": self.codec.state_dict()}, self.root / "codec.pt")
         torch.save({"state": self.lm.state_dict()}, self.root / "lm.pt")
+        self.save_light()
+
+    def save_light(self) -> None:
+        """Cheap state (clusters, counters) - written after every hear/respond so it never lags the buffer."""
         self.clusters.save(self.root / "clusters.json")
         (self.root / "meta.json").write_text(json.dumps(self.meta, indent=1))
 
@@ -78,11 +82,15 @@ class VoiceCore:
         return self.cfg.codec.sample_rate
 
     # -- perception --------------------------------------------------------------------------------
-    def _tensor(self, wav: np.ndarray, sr: int | None = None) -> torch.Tensor:
-        wav = np.asarray(wav, dtype=np.float32)
+    def _prepare(self, wav: np.ndarray, sr: int | None = None) -> np.ndarray:
+        """Mono float32 at the engine sample rate."""
+        wav = to_mono(np.asarray(wav, dtype=np.float32))
         if sr is not None and sr != self.sr:
             wav = resample(wav, sr, self.sr)
-        return torch.from_numpy(wav).to(self.device).unsqueeze(0)
+        return np.ascontiguousarray(wav, dtype=np.float32)
+
+    def _tensor(self, wav: np.ndarray, sr: int | None = None) -> torch.Tensor:
+        return torch.from_numpy(self._prepare(wav, sr)).to(self.device).unsqueeze(0)
 
     def fingerprint(self, wav: np.ndarray, sr: int | None = None) -> np.ndarray:
         """Acoustic fingerprint of an utterance: level-normalised spectral shape, per-band spread and per-band
@@ -99,21 +107,31 @@ class VoiceCore:
         return torch.cat([shape, spread, flux]).cpu().numpy()
 
     def hear(self, wav: np.ndarray, sr: int | None = None, *, source: str = "mic") -> dict:
-        """Store an utterance for learning and report which voice/language cluster it belongs to."""
-        wav = resample(np.asarray(wav, dtype=np.float32), sr, self.sr) if sr and sr != self.sr else np.asarray(wav, dtype=np.float32)
+        """Store an utterance for learning (without replying) and report its voice/language cluster.
+        Do not also call respond(learn=True) on the same audio: respond() already hears what it answers."""
+        wav = self._prepare(wav, sr)
         cluster = self.clusters.observe(self.fingerprint(wav))
         row = self.buffer.add_heard(wav, cluster=cluster, source=source)
+        self.save_light()
         return {"id": row["id"], "cluster": cluster, "cluster_name": self.clusters.label(cluster),
                 "seconds": row["seconds"]}
 
     # -- speaking ----------------------------------------------------------------------------------
     def respond(self, wav: np.ndarray, sr: int | None = None, *, learn: bool = True,
                 on_chunk: Callable[[np.ndarray], None] | None = None, max_seconds: float | None = None) -> np.ndarray:
-        """Reply in audio to audio. Returns the reply waveform at the engine's sample rate."""
+        """Reply in audio to audio. Returns the reply waveform at the engine's sample rate.
+        With learn=True the utterance is heard (clustered, stored with the reply) exactly once."""
+        return self.converse(wav, sr, learn=learn, on_chunk=on_chunk, max_seconds=max_seconds)["reply"]
+
+    def converse(self, wav: np.ndarray, sr: int | None = None, *, learn: bool = True,
+                 on_chunk: Callable[[np.ndarray], None] | None = None, max_seconds: float | None = None) -> dict:
+        """Like respond() but also returns the cluster and the stored exchange id."""
         self.codec.eval()
         self.lm.eval()
         wav_t = self._tensor(wav, sr)
         heard_np = wav_t[0].cpu().numpy()
+        self.last_cluster = None
+        self.last_exchange_id = None
         codes = self.codec.encode(wav_t)
         style = self.codec.embed(wav_t)
         sp = self.lm.special
@@ -123,7 +141,8 @@ class VoiceCore:
         prompt = torch.cat([bos, codes, sep], dim=-1)
         if prompt.shape[-1] >= self.lm.cfg.max_frames - 2:
             prompt = torch.cat([bos, codes[:, :, -(self.lm.cfg.max_frames - 4):], sep], dim=-1)
-        max_frames = int((max_seconds or self.cfg.max_response_seconds) * self.cfg.codec.frame_rate)
+        limit = self.cfg.max_response_seconds if max_seconds is None else max_seconds
+        max_frames = int(limit * self.cfg.codec.frame_rate)
 
         def cb(frames: torch.Tensor) -> None:
             if on_chunk is not None:
@@ -132,11 +151,19 @@ class VoiceCore:
         new = generate(self.lm, prompt, style, max_new_frames=max_frames, temperature=self.cfg.temperature,
                        top_k=self.cfg.top_k, chunk_callback=cb if on_chunk else None)
         reply = self.codec.decode(new)[0].cpu().numpy() if new.shape[-1] else np.zeros(0, dtype=np.float32)
+        info = {"reply": reply, "cluster": None, "cluster_name": "unknown", "exchange_id": None,
+                "reply_seconds": len(reply) / self.sr}
         if learn:
             cluster = self.clusters.observe(self.fingerprint(heard_np))
-            self.buffer.add_exchange(heard_np, reply, cluster=cluster, origin="live")
-            self.meta["exchanges"] = self.meta.get("exchanges", 0) + 1
-        return reply
+            info["cluster"], info["cluster_name"] = cluster, self.clusters.label(cluster)
+            if len(reply) >= self.codec.hop:                      # an empty reply teaches nothing
+                row = self.buffer.add_exchange(heard_np, reply, cluster=cluster, origin="live")
+                info["exchange_id"] = row["id"]
+                self.meta["exchanges"] = self.meta.get("exchanges", 0) + 1
+            else:
+                self.buffer.add_heard(heard_np, cluster=cluster, source="live")
+            self.save_light()
+        return info
 
     def respond_file(self, in_path: str | Path, out_path: str | Path, **kw) -> np.ndarray:
         wav = load_audio(in_path, self.sr)

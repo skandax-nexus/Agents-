@@ -39,6 +39,48 @@ def test_hear_respond_stream_save_load(tmp_path):
     assert np.allclose(vc2.round_trip(wav), rt)
 
 
+def test_relative_root_and_moved_engine(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = VoiceCoreConfig.tiny(); cfg.max_response_seconds = 0.5
+    vc = VoiceCore("rel_engine", cfg)                      # relative root
+    vc.hear(proto_speech(0.5, seed=1))
+    vc.respond(proto_speech(0.5, seed=2))
+    rows = vc.buffer.rows
+    assert all(not str(r.get("path", r.get("heard"))).startswith("/") for r in rows)   # stored relative
+    (tmp_path / "rel_engine").rename(tmp_path / "moved")
+    monkeypatch.chdir(tmp_path / "moved")
+    vc2 = VoiceCore(tmp_path / "moved")
+    assert len(vc2.buffer.heard_clips()) == 2 and vc2.buffer.heard_seconds() > 0.9
+
+
+def test_init_refuses_mismatched_config(tmp_path):
+    vc = _engine(tmp_path); vc.save()
+    big = VoiceCoreConfig.tiny(); big.codec.latent_dim = 48
+    with pytest.raises(RuntimeError):
+        VoiceCore(tmp_path / "vc", big)
+    assert VoiceCore(tmp_path / "vc").cfg.codec.latent_dim == 32      # config.json was not overwritten
+
+
+def test_stereo_input_and_empty_reply(tmp_path):
+    vc = _engine(tmp_path)
+    stereo = np.stack([proto_speech(0.5, seed=1)] * 2, axis=1)
+    assert vc.hear(stereo)["seconds"] == 0.5
+    assert vc.respond(stereo, learn=False).ndim == 1
+    # an empty reply is not stored as an exchange, the utterance is still remembered as heard
+    info = vc.converse(proto_speech(0.5, seed=3), max_seconds=0.0)
+    assert info["reply_seconds"] == 0 and info["exchange_id"] is None
+    assert vc.buffer.stats()["exchanges"] == 0 and vc.buffer.stats()["heard_utterances"] == 2
+
+
+def test_self_play_does_not_pollute_heard_pool(tmp_path):
+    buf = ExperienceBuffer(tmp_path / "exp", 16000)
+    buf.add_heard(proto_speech(0.5, seed=1))
+    buf.add_exchange(proto_speech(0.5, seed=1), proto_speech(0.4, seed=2), origin="self-play")
+    buf.add_exchange(proto_speech(0.5, seed=4), proto_speech(0.4, seed=2), origin="live")
+    assert len(buf.heard_clips()) == 2 and len(buf.exchanges()) == 2
+    assert abs(buf.heard_seconds() - 1.0) < 0.01
+
+
 def test_respond_file(tmp_path):
     from voicecore.audio.io import write_wav, read_wav
     vc = _engine(tmp_path)
@@ -57,7 +99,7 @@ def test_experience_buffer_and_feedback(tmp_path):
     assert buf.exchanges(exclude_negative=False)[0]["feedback"] == -1
     buf2 = ExperienceBuffer(tmp_path / "exp", 16000)  # persisted
     assert buf2.stats()["negative_feedback"] == 1 and len(buf2.heard_clips()) == 2
-    assert abs(buf2.heard_seconds() - 1.4) < 0.01
+    assert abs(buf2.heard_seconds() - 1.0) < 0.01    # heard side of the exchange counts, the reply does not
 
 
 def test_voice_clusters_discover_two_languages(tmp_path):
