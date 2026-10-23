@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoiceCore</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#e8eaf0; --muted:#9aa3b2; --accent:#5ad1a5; --warn:#f0b35a; --bad:#ef6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:20px 24px 8px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:20px; font-weight:600; letter-spacing:.2px; }
+  header p { margin:4px 0 0; color:var(--muted); }
+  main { display:grid; grid-template-columns: 1.3fr 1fr; gap:16px; padding:16px 24px 32px; max-width:1180px; }
+  @media (max-width: 900px) { main { grid-template-columns:1fr; } }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  h2 { margin:0 0 10px; font-size:14px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+  button { background:#242938; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:8px 14px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#06120d; border-color:var(--accent); font-weight:600; }
+  button.rec { background:var(--bad); border-color:var(--bad); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:8px 0; }
+  audio { width:100%; margin-top:6px; }
+  .label { font-size:13px; color:var(--muted); }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; background:#242938; border:1px solid var(--line); font-size:13px; }
+  .pill.ok { border-color:var(--accent); color:var(--accent); }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  td, th { padding:6px 4px; border-bottom:1px solid var(--line); text-align:left; }
+  input[type=text], input[type=number] { background:#0f1115; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; width:120px; }
+  pre { margin:0; white-space:pre-wrap; font-size:12px; color:var(--muted); max-height:160px; overflow:auto; }
+  .status { color:var(--warn); min-height:1.4em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>VoiceCore</h1>
+  <p>From-scratch voice-to-voice engine. Speak or upload a clip, hear it reply in audio. No text, no pretrained models; it learns from what it hears.</p>
+</header>
+<main>
+  <section>
+    <h2>Talk</h2>
+    <div class="row">
+      <button id="rec" class="rec">● Record</button>
+      <label class="pill" for="file" style="cursor:pointer">Upload wav</label>
+      <input id="file" type="file" accept=".wav,audio/wav" style="display:none">
+      <label class="label"><input id="learn" type="checkbox" checked> learn from this exchange</label>
+    </div>
+    <div class="label">You said</div>
+    <audio id="in" controls></audio>
+    <div class="row">
+      <button id="talk" class="primary" disabled>Reply in voice</button>
+      <button id="rt" disabled>Codec round trip</button>
+      <span id="cluster" class="pill" style="display:none"></span>
+    </div>
+    <div class="label">It said</div>
+    <audio id="out" controls></audio>
+    <div class="row" id="rate" style="display:none">
+      <span class="label">Was that a good reply?</span>
+      <button id="up">👍</button><button id="down">👎</button>
+    </div>
+    <div id="msg" class="status"></div>
+  </section>
+  <section>
+    <h2>Engine</h2>
+    <div id="engine" class="label">loading…</div>
+    <div class="row" style="margin-top:12px">
+      <button id="train">Run one self-training round</button>
+      <span id="trainstate" class="label"></span>
+    </div>
+    <pre id="trainlog"></pre>
+    <h2 style="margin-top:16px">Voices / languages discovered</h2>
+    <div class="row">
+      <label class="label">clusters <input id="k" type="number" min="1" max="32" value="2"></label>
+      <button id="refit">Refit</button>
+    </div>
+    <table id="clusters"><tbody></tbody></table>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let inputBlob = null, lastExchange = null, mediaRecorder = null, chunks = [];
+
+async function status() {
+  const s = await (await fetch('/api/status')).json();
+  $('engine').innerHTML =
+    `${s.sample_rate} Hz · codec ${s.codec_params.toLocaleString()} params (${s.codec_steps} steps) · speech model ${s.lm_params.toLocaleString()} params (${s.lm_steps} steps)<br>` +
+    `heard ${s.experience.heard_utterances} utterances, ${s.experience.exchanges} exchanges (${s.experience.seconds_heard}s), ${s.experience.positive_feedback}👍 ${s.experience.negative_feedback}👎 · fingerprint: ${s.fingerprint}`;
+  const tb = $('clusters').querySelector('tbody'); tb.innerHTML = '';
+  (s.voice_clusters || []).forEach(c => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${c.id}</td><td><input type="text" value="${c.name}" data-id="${c.id}"></td><td>${c.utterances} utt.</td><td><button data-id="${c.id}">name</button></td>`;
+    tb.appendChild(tr);
+  });
+  tb.querySelectorAll('button').forEach(b => b.onclick = async () => {
+    const inp = tb.querySelector(`input[data-id="${b.dataset.id}"]`);
+    await fetch(`/api/name?cluster=${b.dataset.id}&label=${encodeURIComponent(inp.value)}`, {method:'POST'}); status();
+  });
+  if (!(s.voice_clusters||[]).length) tb.innerHTML = '<tr><td class="label">nothing heard yet</td></tr>';
+  $('trainstate').textContent = s.selftrain.running ? 'running…' : (s.selftrain.last ? `last round: ${s.selftrain.last.stage}, codec ${s.selftrain.last.codec_snr_db ?? '?'} dB` : '');
+  return s;
+}
+
+// --- audio helpers: anything recorded/uploaded becomes 16 kHz mono 16-bit WAV
+function encodeWav(samples, sr) {
+  const buf = new ArrayBuffer(44 + samples.length * 2), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0,'RIFF'); v.setUint32(4, 36 + samples.length*2, true); w(8,'WAVE'); w(12,'fmt '); v.setUint32(16,16,true);
+  v.setUint16(20,1,true); v.setUint16(22,1,true); v.setUint32(24,sr,true); v.setUint32(28,sr*2,true); v.setUint16(32,2,true); v.setUint16(34,16,true);
+  w(36,'data'); v.setUint32(40, samples.length*2, true);
+  for (let i = 0; i < samples.length; i++) v.setInt16(44 + i*2, Math.max(-1, Math.min(1, samples[i])) * 32767, true);
+  return new Blob([buf], {type:'audio/wav'});
+}
+async function toWav16k(blob) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const audio = await ctx.decodeAudioData(await blob.arrayBuffer());
+  const mono = audio.getChannelData(0);
+  const ratio = audio.sampleRate / 16000, n = Math.floor(mono.length / ratio), out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = mono[Math.floor(i * ratio)];
+  ctx.close();
+  return encodeWav(out, 16000);
+}
+function setInput(blob) { inputBlob = blob; $('in').src = URL.createObjectURL(blob); $('talk').disabled = $('rt').disabled = false; $('msg').textContent = ''; }
+
+// --- record
+$('rec').onclick = async () => {
+  if (mediaRecorder && mediaRecorder.state === 'recording') { mediaRecorder.stop(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    mediaRecorder = new MediaRecorder(stream); chunks = [];
+    mediaRecorder.ondataavailable = e => chunks.push(e.data);
+    mediaRecorder.onstop = async () => { stream.getTracks().forEach(t => t.stop()); $('rec').textContent = '● Record'; setInput(await toWav16k(new Blob(chunks))); };
+    mediaRecorder.start(); $('rec').textContent = '■ Stop';
+  } catch (e) { $('msg').textContent = 'microphone unavailable: ' + e.message; }
+};
+$('file').onchange = async e => { if (e.target.files[0]) setInput(await toWav16k(e.target.files[0])); };
+
+// --- talk / round trip
+async function post(url) {
+  $('msg').textContent = 'thinking…'; $('talk').disabled = $('rt').disabled = true;
+  try {
+    const r = await fetch(url, {method:'POST', body: inputBlob, headers:{'Content-Type':'audio/wav'}});
+    if (!r.ok) throw new Error((await r.json()).error);
+    return r;
+  } finally { $('talk').disabled = $('rt').disabled = false; }
+}
+$('talk').onclick = async () => {
+  try {
+    const r = await post('/api/respond?learn=' + ($('learn').checked ? 1 : 0));
+    $('out').src = URL.createObjectURL(await r.blob()); $('out').play().catch(()=>{});
+    const name = r.headers.get('X-Cluster-Name'); lastExchange = r.headers.get('X-Exchange-Id') || null;
+    $('cluster').style.display = ''; $('cluster').textContent = 'voice: ' + name; $('cluster').className = 'pill ok';
+    $('rate').style.display = lastExchange ? '' : 'none';
+    $('msg').textContent = `replied with ${r.headers.get('X-Reply-Seconds')}s of audio`; status();
+  } catch (e) { $('msg').textContent = 'error: ' + e.message; }
+};
+$('rt').onclick = async () => {
+  try { const r = await post('/api/roundtrip'); $('out').src = URL.createObjectURL(await r.blob()); $('out').play().catch(()=>{}); $('rate').style.display='none'; $('msg').textContent = 'codec round trip (what the engine hears and can re-say)'; }
+  catch (e) { $('msg').textContent = 'error: ' + e.message; }
+};
+$('up').onclick = () => rate(1); $('down').onclick = () => rate(-1);
+async function rate(v) { if (!lastExchange) return; await fetch(`/api/feedback?id=${lastExchange}&value=${v}`, {method:'POST'}); $('msg').textContent = 'thanks, it will learn from that'; $('rate').style.display='none'; status(); }
+
+// --- self-training & clusters
+$('train').onclick = async () => { await fetch('/api/selftrain', {method:'POST'}); poll(); };
+async function poll() {
+  const s = await (await fetch('/api/selftrain')).json();
+  $('trainstate').textContent = s.running ? 'running…' : (s.error ? 'error: ' + s.error : 'done');
+  $('trainlog').textContent = (s.events || []).map(e => e.kind === 'codec_step' ? `codec step ${e.step}: loss ${e.total.toFixed(3)}` : e.kind === 'lm_step' ? `lm step ${e.step}: loss ${e.loss.toFixed(3)}` : JSON.stringify(e)).join('\n');
+  if (s.running) setTimeout(poll, 1500); else status();
+}
+$('refit').onclick = async () => { const r = await (await fetch('/api/refit?k=' + $('k').value, {method:'POST'})).json(); $('msg').textContent = 'refit: ' + JSON.stringify(r); status(); };
+status();
+</script>
+</body>
+</html>

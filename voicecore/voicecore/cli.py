@@ -8,6 +8,7 @@
     voicecore listen ~/vc                           # microphone loop (pip install sounddevice)
     voicecore selftrain ~/vc --rounds 3             # learn from everything heard and said
     voicecore status ~/vc | langs ~/vc | name ~/vc 0 Hindi | feedback ~/vc <id> +1
+    voicecore serve ~/vc                            # web UI at http://localhost:8765
 """
 from __future__ import annotations
 
@@ -258,6 +259,13 @@ def cmd_feedback(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_serve(args) -> int:
+    """Local web UI: record or upload, hear the reply, rate it, run self-training."""
+    from .server import serve
+    serve(args.root, host=args.host, port=args.port, open_browser=args.open)
+    return 0
+
+
 def cmd_demo(args) -> int:
     """Everything from scratch on synthetic proto-speech in two 'languages': shows the codec learning to
     hear, the LM learning structure, replies matching the input's cluster, and a self-training round."""
@@ -368,6 +376,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_name)
     s = sub.add_parser("feedback", help="rate a reply: +1 / -1"); s.add_argument("root"); s.add_argument("exchange_id"); s.add_argument("value")
     s.set_defaults(func=cmd_feedback)
+    s = sub.add_parser("serve", help="local web UI at http://localhost:8765 (record, reply, rate, self-train)")
+    s.add_argument("root"); s.add_argument("--port", type=int, default=8765); s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--open", action="store_true", help="open the browser")
+    s.set_defaults(func=cmd_serve)
     s = sub.add_parser("demo", help="from-scratch learning on synthetic proto-speech (CPU, a few minutes)")
     s.add_argument("--root"); s.add_argument("--seconds", type=float, default=120.0)
     s.add_argument("--codec-steps", type=int, default=300); s.add_argument("--lm-steps", type=int, default=300)

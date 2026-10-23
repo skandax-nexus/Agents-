@@ -21,5 +21,8 @@ voicecore = "voicecore.cli:main"
 [tool.setuptools.packages.find]
 include = ["voicecore*"]
 
+[tool.setuptools.package-data]
+voicecore = ["static/*.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
