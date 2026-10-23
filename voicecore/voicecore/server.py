@@ -165,6 +165,8 @@ def make_handler(service: EngineService):
                 self._json(service.status())
             elif url.path == "/api/selftrain":
                 self._json({**service.selftrain, "events": service.events[-20:]})
+            elif url.path == "/favicon.ico":
+                self._send(204, b"", "image/x-icon")
             else:
                 self._json({"error": "not found"}, 404)
 

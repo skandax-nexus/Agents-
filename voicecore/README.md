@@ -97,6 +97,17 @@ voicecore feedback ~/vc <exchange-id> +1                  # teach it which repli
 voicecore status ~/vc
 ```
 
+## Web UI
+
+```bash
+voicecore serve ~/vc --open        # http://localhost:8765
+```
+
+Record from the microphone or upload a clip, hear the voice reply or the codec round trip, see
+which voice cluster it was assigned to, rate replies, run a self-training round with live
+progress, and refit or name discovered voices. The page is served by the standard library; no
+extra packages. The same endpoints are a plain HTTP API (`voicecore/server.py`).
+
 ## Python API
 
 ```python
