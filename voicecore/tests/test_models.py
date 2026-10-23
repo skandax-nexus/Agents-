@@ -148,5 +148,5 @@ def test_lm_learns_structure(cfg):
     # a heard utterance longer than the context is tail-truncated so the reply is still scored
     long_h = proto_speech(8.0, seed=9)                       # 400 frames > max_frames 256
     lp_a = tr.exchange_logprob(long_h, r)
-    lp_b = tr.exchange_logprob(long_h, proto_speech(0.6, seed=10))
-    assert lp_a != lp_b
+    lp_b = tr.exchange_logprob(long_h, proto_speech(0.3, seed=10))   # different length -> different token sequence
+    assert math.isfinite(lp_a) and math.isfinite(lp_b) and lp_a != lp_b
