@@ -93,7 +93,8 @@ async function api(url, opts = {}) {
   const headers = Object.assign({}, opts.headers || {});
   if (token) headers['Authorization'] = 'Bearer ' + token;
   const r = await fetch(url, Object.assign({}, opts, { headers }));
-  if (r.status === 401) { $('tokenbox').style.display = ''; throw new Error('this server requires a token: enter it in the Engine panel'); }
+  if (r.status === 401) { try { await r.text(); } catch (e) {}   // consume the body so the connection is released
+    $('tokenbox').style.display = ''; throw new Error('this server requires a token: enter it in the Engine panel'); }
   return r;
 }
 $('tokensave').onclick = () => { setToken($('token').value.trim()); $('tokenbox').style.display = 'none'; status(); };

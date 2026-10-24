@@ -38,6 +38,7 @@ import numpy as np
 from . import __version__
 from .audio.io import to_mono
 from .engine import VoiceCore
+from .fsutil import EngineLock
 from .lang.cluster import clean_label
 
 STATIC = Path(__file__).parent / "static"
@@ -213,7 +214,10 @@ class EngineService:
                 log.warning("self-training did not stop in time; its own round-end save is the last state")
                 return
         with self.lock:
-            self.engine.save()
+            try:
+                self.engine.save()
+            except OSError:
+                log.exception("could not save the engine on shutdown; the last successful save stands")
 
     def save(self) -> None:
         with self.lock:
@@ -426,10 +430,16 @@ def serve(root: str | Path, host: str = "127.0.0.1", port: int = 8765, *, open_b
             raise SystemExit(f"unknown preset {init_preset!r}; choose one of {', '.join(presets)}")
         log.info("no engine at %s: creating one with the %s preset (random weights)", root, init_preset)
         VoiceCore(root, presets[init_preset]()).save()
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        lock = EngineLock(root).acquire()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
     engine = VoiceCore(root)
     try:
         service = EngineService(engine, token=token, max_upload_bytes=max_upload_mb << 20)
     except ValueError as exc:
+        lock.release()
         raise SystemExit(str(exc)) from exc
     httpd = _Server((host, port), make_handler(service))
     url = f"http://{host}:{port}" if ":" not in host else f"http://[{host}]:{port}"
@@ -461,4 +471,5 @@ def serve(root: str | Path, host: str = "127.0.0.1", port: int = 8765, *, open_b
         httpd.shutdown()
         httpd.server_close()
         service.shutdown()
+        lock.release()
         log.info("engine saved, server stopped")

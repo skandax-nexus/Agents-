@@ -251,3 +251,24 @@ def test_serve_refuses_bad_settings(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         serve(tmp_path / "new", host="127.0.0.1", port=0, init_preset="nope")
     assert not (tmp_path / "new" / "config.json").exists()
+
+
+def test_engine_lock_and_unique_temp_files(tmp_path):
+    from voicecore.fsutil import EngineLock, atomic_write_text
+    root = tmp_path / "vc"; root.mkdir()
+    with EngineLock(root):
+        with pytest.raises(RuntimeError):
+            EngineLock(root).acquire()
+    EngineLock(root).acquire().release()                          # released cleanly
+    # two writers of the same file from different threads never collide on a temp name
+    errors = []
+    def write(i):
+        try:
+            for _ in range(20):
+                atomic_write_text(root / "state.json", json.dumps({"writer": i}))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+    ts = [threading.Thread(target=write, args=(i,)) for i in range(4)]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert not errors and json.loads((root / "state.json").read_text())["writer"] in range(4)
+    assert not list(root.glob("*.tmp"))

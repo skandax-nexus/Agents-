@@ -32,8 +32,9 @@ panel when prompted; it is kept for that browser tab only.
   localhost server through a visitor's browser.
 - Cluster names are limited to 40 printable characters (no control characters) and are
   percent-encoded in response headers and rendered as text, never as HTML.
-- One process serves one engine. Requests are serialised through a lock (torch models are not
-  safe for concurrent use), so throughput is one reply at a time; replies take 0.5 to 2 s on CPU
+- One process serves one engine: `voicecore serve` takes an exclusive lock on the engine
+  directory and a second server on the same directory refuses to start. Requests are serialised
+  through a lock (torch models are not safe for concurrent use), so throughput is one reply at a time; replies take 0.5 to 2 s on CPU
   for the `cpu` preset. Run several containers behind the proxy for more concurrency; they do
   not share learning.
 - Self-training runs in a background thread inside the server and holds the engine lock for the
