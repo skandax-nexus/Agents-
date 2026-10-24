@@ -41,11 +41,15 @@ class CodecTrainer:
         self.step_no += 1
         return parts
 
-    def train(self, corpus: AudioCorpus, steps: int, *, log_every: int = 25, seed: int | None = None) -> dict:
+    def train(self, corpus: AudioCorpus, steps: int, *, log_every: int = 25, seed: int | None = None,
+              stop=None) -> dict:
+        """`stop` is an optional callable checked between steps (cooperative shutdown)."""
         rng = random.Random(self.cfg.train.seed if seed is None else seed)
         started = time.time()
         last = {}
         for i in range(steps):
+            if stop is not None and stop():
+                break
             batch = corpus.sample_batch(self.cfg.train.batch_size, self.cfg.train.segment_seconds, rng)
             last = self.step(batch)
             if (i + 1) % log_every == 0 or i + 1 == steps:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 import time
 
 import numpy as np
@@ -25,15 +26,17 @@ import torch
 from ..codec.train import CodecTrainer
 from ..config import VoiceCoreConfig
 from ..data import AudioCorpus
+from ..fsutil import atomic_write_text
 from ..lm.train import LMTrainer
 from .buffer import ExperienceBuffer
 
 
 class SelfTrainer:
-    def __init__(self, engine, *, on_event=None) -> None:
+    def __init__(self, engine, *, on_event=None, stop_event: threading.Event | None = None) -> None:
         from ..engine import VoiceCore  # noqa: F401 - type only
 
         self.engine = engine
+        self.stop_event = stop_event or threading.Event()
         self.cfg: VoiceCoreConfig = engine.cfg
         self.sc = self.cfg.selftrain
         self.buffer: ExperienceBuffer = engine.buffer
@@ -88,8 +91,12 @@ class SelfTrainer:
             self._emit("selftrain_skipped", **report)
             return report
 
+        stop = self.stop_event.is_set
         # 1. codec
-        self.codec_trainer.train(corpus, self.sc.codec_steps_per_round, seed=self.state["rounds"])
+        self.codec_trainer.train(corpus, self.sc.codec_steps_per_round, seed=self.state["rounds"], stop=stop)
+        if stop():
+            report["note"] = "stopped during codec training"
+            return self._finish(report, started)
         self.engine.mark_codec_trained(self.sc.codec_steps_per_round)
         quality = self.codec_trainer.evaluate(corpus)
         snr = quality["snr_db"]
@@ -105,7 +112,10 @@ class SelfTrainer:
             self.state["stage"] = "lm"
 
         # 2. LM on everything heard
-        loss = self.lm_trainer.train_continuation(corpus, self.sc.lm_steps_per_round, seed=self.state["rounds"])
+        loss = self.lm_trainer.train_continuation(corpus, self.sc.lm_steps_per_round, seed=self.state["rounds"], stop=stop)
+        if stop():
+            report["note"] = "stopped during speech-model training"
+            return self._finish(report, started)
         self.state["lm_loss"] = round(loss, 4)
         report["lm_loss"] = self.state["lm_loss"]
 
@@ -115,6 +125,8 @@ class SelfTrainer:
         rng.shuffle(clips)
         kept = 0
         for heard in clips[: self.sc.self_play_samples]:
+            if stop():
+                break
             cands = []
             for _ in range(self.sc.candidates_per_sample):
                 reply = self.engine.respond(heard, sr, learn=False)
@@ -133,10 +145,15 @@ class SelfTrainer:
             self.state["stage"] = "dialogue"
             d_loss = float("nan")
             for _ in range(self.sc.dialogue_steps_per_round):
+                if stop():
+                    break
                 batch_rows = rng.sample(rows, k=min(self.cfg.train.batch_size, len(rows)))
                 pairs, weights = [], []
                 for r in batch_rows:
-                    h, s = self.buffer.load_exchange(r)
+                    loaded = self.buffer.load_exchange(r)
+                    if loaded is None:
+                        continue
+                    h, s = loaded
                     if len(h) < self.engine.codec.hop or len(s) < self.engine.codec.hop:
                         continue
                     pairs.append((h[: int(self.cfg.max_response_seconds * sr)], s[: int(self.cfg.max_response_seconds * sr)]))
@@ -159,7 +176,7 @@ class SelfTrainer:
     def _finish(self, report: dict, started: float) -> dict:
         report["stage"] = self.state["stage"]
         report["elapsed"] = round(time.time() - started, 1)
-        self.state_path.write_text(json.dumps(self.state, indent=1))
+        atomic_write_text(self.state_path, json.dumps(self.state, indent=1))
         self.engine.save()
         self._emit("selftrain_round", **report)
         return report

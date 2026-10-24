@@ -263,7 +263,7 @@ def cmd_serve(args) -> int:
     """Local web UI: record or upload, hear the reply, rate it, run self-training."""
     from .server import serve
     serve(args.root, host=args.host, port=args.port, open_browser=args.open, token=args.token,
-          max_upload_mb=args.max_upload_mb, log_level=args.log_level)
+          max_upload_mb=args.max_upload_mb, log_level=args.log_level, init_preset=args.init_preset)
     return 0
 
 
@@ -375,8 +375,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("serve", help="local web UI at http://localhost:8765 (record, reply, rate, self-train)")
     s.add_argument("root"); s.add_argument("--port", type=int, default=8765); s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--open", action="store_true", help="open the browser")
-    s.add_argument("--token", help="bearer token required on /api/* (mandatory when --host is not local)")
-    s.add_argument("--max-upload-mb", type=int, default=64)
+    s.add_argument("--token", help="bearer token required on /api/* (mandatory when --host is not local; "
+                                   "falls back to VOICECORE_TOKEN)")
+    s.add_argument("--init-preset", choices=["tiny", "cpu", "small", "default"],
+                   help="create the engine with this preset if the directory holds none (container first start)")
+    s.add_argument("--max-upload-mb", type=int, default=32)
     s.add_argument("--log-level", default="info", choices=["debug", "info", "warning", "error"])
     s.set_defaults(func=cmd_serve)
     s = sub.add_parser("demo", help="from-scratch learning on synthetic proto-speech (CPU, a few minutes)")

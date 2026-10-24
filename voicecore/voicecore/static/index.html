@@ -64,6 +64,10 @@
   <section>
     <h2>Engine</h2>
     <div id="engine" class="label">loading…</div>
+    <div id="tokenbox" class="row" style="display:none">
+      <label class="label">access token <input id="token" type="password" autocomplete="off"></label>
+      <button id="tokensave">Use token</button>
+    </div>
     <div class="row" style="margin-top:12px">
       <button id="train">Run one self-training round</button>
       <span id="trainstate" class="label"></span>
@@ -81,22 +85,47 @@
 const $ = id => document.getElementById(id);
 let inputBlob = null, lastExchange = null, mediaRecorder = null, chunks = [];
 
+// --- API access: a bearer token (when the server requires one) is kept for this tab only
+let token = '';
+try { token = sessionStorage.getItem('voicecore-token') || new URLSearchParams(location.search).get('token') || ''; } catch (e) {}
+function setToken(t) { token = t || ''; try { sessionStorage.setItem('voicecore-token', token); } catch (e) {} }
+async function api(url, opts = {}) {
+  const headers = Object.assign({}, opts.headers || {});
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const r = await fetch(url, Object.assign({}, opts, { headers }));
+  if (r.status === 401) { $('tokenbox').style.display = ''; throw new Error('this server requires a token: enter it in the Engine panel'); }
+  return r;
+}
+$('tokensave').onclick = () => { setToken($('token').value.trim()); $('tokenbox').style.display = 'none'; status(); };
+
+function el(tag, props = {}, ...children) {   // DOM building without innerHTML, so names can contain anything
+  const e = document.createElement(tag);
+  Object.assign(e, props);
+  for (const c of children) e.append(c);
+  return e;
+}
+
 async function status() {
-  const s = await (await fetch('/api/status')).json();
-  $('engine').innerHTML =
-    `${s.sample_rate} Hz · codec ${s.codec_params.toLocaleString()} params (${s.codec_steps} steps) · speech model ${s.lm_params.toLocaleString()} params (${s.lm_steps} steps)<br>` +
-    `heard ${s.experience.heard_utterances} utterances, ${s.experience.exchanges} exchanges (${s.experience.seconds_heard}s), ${s.experience.positive_feedback}👍 ${s.experience.negative_feedback}👎 · fingerprint: ${s.fingerprint}`;
-  const tb = $('clusters').querySelector('tbody'); tb.innerHTML = '';
+  let s;
+  try { s = await (await api('/api/status')).json(); } catch (e) { $('engine').textContent = e.message; return; }
+  $('engine').textContent = '';
+  $('engine').append(
+    `${s.sample_rate} Hz · codec ${s.codec_params.toLocaleString()} params (${s.codec_steps} steps) · speech model ${s.lm_params.toLocaleString()} params (${s.lm_steps} steps)`,
+    el('br'),
+    `heard ${s.experience.heard_utterances} utterances, ${s.experience.exchanges} exchanges (${s.experience.seconds_heard}s), ${s.experience.positive_feedback}👍 ${s.experience.negative_feedback}👎 · fingerprint: ${s.fingerprint}`);
+  const tb = $('clusters').querySelector('tbody'); tb.textContent = '';
   (s.voice_clusters || []).forEach(c => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${c.id}</td><td><input type="text" value="${c.name}" data-id="${c.id}"></td><td>${c.utterances} utt.</td><td><button data-id="${c.id}">name</button></td>`;
-    tb.appendChild(tr);
+    const input = el('input', { type: 'text', value: c.name, maxLength: 40 });
+    const button = el('button', { textContent: 'name' });
+    button.onclick = async () => {
+      try { const r = await api(`/api/name?cluster=${c.id}&label=${encodeURIComponent(input.value)}`, { method: 'POST' });
+            if (!r.ok) $('msg').textContent = 'error: ' + (await r.json()).error; }
+      catch (e) { $('msg').textContent = e.message; }
+      status();
+    };
+    tb.append(el('tr', {}, el('td', { textContent: String(c.id) }), el('td', {}, input), el('td', { textContent: `${c.utterances} utt.` }), el('td', {}, button)));
   });
-  tb.querySelectorAll('button').forEach(b => b.onclick = async () => {
-    const inp = tb.querySelector(`input[data-id="${b.dataset.id}"]`);
-    await fetch(`/api/name?cluster=${b.dataset.id}&label=${encodeURIComponent(inp.value)}`, {method:'POST'}); status();
-  });
-  if (!(s.voice_clusters||[]).length) tb.innerHTML = '<tr><td class="label">nothing heard yet</td></tr>';
+  if (!(s.voice_clusters || []).length) tb.append(el('tr', {}, el('td', { className: 'label', textContent: 'nothing heard yet' })));
   $('trainstate').textContent = s.selftrain.running ? 'running…' : (s.selftrain.last ? `last round: ${s.selftrain.last.stage}, codec ${s.selftrain.last.codec_snr_db ?? '?'} dB` : '');
   return s;
 }
@@ -139,7 +168,7 @@ $('file').onchange = async e => { if (e.target.files[0]) setInput(await toWav16k
 async function post(url) {
   $('msg').textContent = 'thinking…'; $('talk').disabled = $('rt').disabled = true;
   try {
-    const r = await fetch(url, {method:'POST', body: inputBlob, headers:{'Content-Type':'audio/wav'}});
+    const r = await api(url, {method:'POST', body: inputBlob, headers:{'Content-Type':'audio/wav'}});
     if (!r.ok) throw new Error((await r.json()).error);
     return r;
   } finally { $('talk').disabled = $('rt').disabled = false; }
@@ -148,7 +177,7 @@ $('talk').onclick = async () => {
   try {
     const r = await post('/api/respond?learn=' + ($('learn').checked ? 1 : 0));
     $('out').src = URL.createObjectURL(await r.blob()); $('out').play().catch(()=>{});
-    const name = r.headers.get('X-Cluster-Name'); lastExchange = r.headers.get('X-Exchange-Id') || null;
+    const name = decodeURIComponent(r.headers.get('X-Cluster-Name') || ''); lastExchange = r.headers.get('X-Exchange-Id') || null;
     $('cluster').style.display = ''; $('cluster').textContent = 'voice: ' + name; $('cluster').className = 'pill ok';
     $('rate').style.display = lastExchange ? '' : 'none';
     $('msg').textContent = `replied with ${r.headers.get('X-Reply-Seconds')}s of audio`; status();
@@ -159,17 +188,18 @@ $('rt').onclick = async () => {
   catch (e) { $('msg').textContent = 'error: ' + e.message; }
 };
 $('up').onclick = () => rate(1); $('down').onclick = () => rate(-1);
-async function rate(v) { if (!lastExchange) return; await fetch(`/api/feedback?id=${lastExchange}&value=${v}`, {method:'POST'}); $('msg').textContent = 'thanks, it will learn from that'; $('rate').style.display='none'; status(); }
+async function rate(v) { if (!lastExchange) return; try { await api(`/api/feedback?id=${encodeURIComponent(lastExchange)}&value=${v}`, {method:'POST'}); $('msg').textContent = 'thanks, it will learn from that'; } catch (e) { $('msg').textContent = e.message; } $('rate').style.display='none'; status(); }
 
 // --- self-training & clusters
-$('train').onclick = async () => { await fetch('/api/selftrain', {method:'POST'}); poll(); };
+$('train').onclick = async () => { try { await api('/api/selftrain', {method:'POST'}); poll(); } catch (e) { $('msg').textContent = e.message; } };
 async function poll() {
-  const s = await (await fetch('/api/selftrain')).json();
+  let s;
+  try { s = await (await api('/api/selftrain')).json(); } catch (e) { $('trainstate').textContent = e.message; return; }
   $('trainstate').textContent = s.running ? 'running…' : (s.error ? 'error: ' + s.error : 'done');
   $('trainlog').textContent = (s.events || []).map(e => e.kind === 'codec_step' ? `codec step ${e.step}: loss ${e.total.toFixed(3)}` : e.kind === 'lm_step' ? `lm step ${e.step}: loss ${e.loss.toFixed(3)}` : JSON.stringify(e)).join('\n');
   if (s.running) setTimeout(poll, 1500); else status();
 }
-$('refit').onclick = async () => { const r = await (await fetch('/api/refit?k=' + $('k').value, {method:'POST'})).json(); $('msg').textContent = 'refit: ' + JSON.stringify(r); status(); };
+$('refit').onclick = async () => { try { const r = await (await api('/api/refit?k=' + encodeURIComponent($('k').value), {method:'POST'})).json(); $('msg').textContent = 'refit: ' + JSON.stringify(r); } catch (e) { $('msg').textContent = e.message; } status(); };
 status();
 </script>
 </body>

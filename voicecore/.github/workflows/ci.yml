@@ -14,8 +14,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - run: pip install --index-url https://download.pytorch.org/whl/cpu torch
-      - run: pip install -e ".[dev]" ruff
+      - run: pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.14.*"
+      - run: pip install -e ".[dev]" "ruff==0.16.*"
       - run: ruff check voicecore tests scripts
       - run: pytest -q
       - name: smoke the CLI end to end
@@ -28,11 +28,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t voicecore .
-      - name: container answers on /healthz
+      - name: container answers on /healthz and enforces the token
         run: |
-          docker run -d --rm --name vc -e VOICECORE_TOKEN=ci -e VOICECORE_PRESET=tiny -p 8765:8765 voicecore
+          docker run -d --rm --name vc -e VOICECORE_TOKEN=ci-token-1234 -p 8765:8765 voicecore --init-preset tiny
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8765/healthz && break; sleep 2; done
           curl -sf http://127.0.0.1:8765/healthz
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/api/status)" = "401"
-          curl -sf -H 'Authorization: Bearer ci' http://127.0.0.1:8765/api/status > /dev/null
+          curl -sf -H 'Authorization: Bearer ci-token-1234' http://127.0.0.1:8765/api/status > /dev/null
           docker stop vc

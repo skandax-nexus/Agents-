@@ -77,11 +77,14 @@ class LMTrainer:
         seq = torch.cat([bos, codes], dim=-1)[:, :, : self.lm.cfg.max_frames]
         return self._update(self.lm.loss(seq, style))
 
-    def train_continuation(self, corpus: AudioCorpus, steps: int, *, log_every: int = 25, seed: int | None = None) -> float:
+    def train_continuation(self, corpus: AudioCorpus, steps: int, *, log_every: int = 25, seed: int | None = None,
+                           stop=None) -> float:
         rng = random.Random(self.cfg.train.seed if seed is None else seed)
         started = time.time()
         loss = float("nan")
         for i in range(steps):
+            if stop is not None and stop():
+                break
             batch = corpus.sample_batch(self.cfg.train.batch_size, self.cfg.train.segment_seconds, rng)
             loss = self.step_continuation(batch)
             if (i + 1) % log_every == 0 or i + 1 == steps:

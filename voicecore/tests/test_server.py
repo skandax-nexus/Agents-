@@ -2,6 +2,7 @@
 import io
 import json
 import threading
+import urllib.parse
 import urllib.request
 import wave
 from http.server import ThreadingHTTPServer
@@ -81,7 +82,7 @@ def test_api_flow(server):
 def test_health_and_limits(tmp_path):
     cfg = VoiceCoreConfig.tiny(); cfg.max_response_seconds = 0.3
     engine = VoiceCore(tmp_path / "vc", cfg)
-    service = EngineService(engine, token="s3cret", max_upload_bytes=20_000, max_input_seconds=1.0)
+    service = EngineService(engine, token="s3cret-token", max_upload_bytes=20_000, max_input_seconds=1.0)
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(service))
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -96,7 +97,7 @@ def test_health_and_limits(tmp_path):
         with pytest.raises(urllib.error.HTTPError) as exc:
             _post(base + "/api/respond", audio_to_wav_bytes(proto_speech(0.3, seed=1), 16000))
         assert exc.value.code == 401
-        auth = {"Authorization": "Bearer s3cret"}
+        auth = {"Authorization": "Bearer s3cret-token"}
         req = urllib.request.Request(base + "/api/status", headers=auth)
         assert json.loads(urllib.request.urlopen(req, timeout=10).read())["version"]
         # oversized upload -> 413, then the connection is still usable
@@ -135,3 +136,118 @@ def test_atomic_saves_leave_no_temp_files(tmp_path):
     idx = tmp_path / "vc" / "experience" / "index.jsonl"
     idx.write_text(idx.read_text() + '{"id": "broken", "kind": "heard"', encoding="utf-8")
     assert VoiceCore(tmp_path / "vc").buffer.stats()["heard_utterances"] == 1
+
+
+def _server_with(service):
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(service))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+
+def test_audit_fixes(tmp_path):
+    import http.client
+
+    cfg = VoiceCoreConfig.tiny(); cfg.max_response_seconds = 0.3
+    engine = VoiceCore(tmp_path / "vc", cfg)
+    service = EngineService(engine, max_input_seconds=1.0)
+    httpd, base = _server_with(service)
+    try:
+        wav = audio_to_wav_bytes(proto_speech(0.8, seed=2), 16000)
+        # cluster names: control characters rejected, any script accepted and percent-encoded in the header
+        _post(base + "/api/hear", wav)
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _post(base + "/api/name?cluster=0&label=" + urllib.parse.quote("evil\r\nX-Injected: 1"))
+        assert exc.value.code == 400
+        named = json.loads(_post(base + "/api/name?cluster=0&label=" + urllib.parse.quote("हिन्दी <b>")).read())
+        assert named["clusters"][0]["name"] == "हिन्दी <b>"
+        r = _post(base + "/api/respond?learn=1", wav)
+        header = r.headers["X-Cluster-Name"]
+        assert header.isascii() and urllib.parse.unquote(header) == "हिन्दी <b>"
+        r.read()
+        # cross-site requests are refused, same-origin and non-browser requests pass
+        req = urllib.request.Request(base + "/api/refit?k=1", data=b"", method="POST", headers={"Origin": "https://evil.example"})
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(req, timeout=10)
+        assert exc.value.code == 403
+        req = urllib.request.Request(base + "/api/refit?k=1", data=b"", method="POST", headers={"Sec-Fetch-Site": "cross-site"})
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(req, timeout=10)
+        assert exc.value.code == 403
+        req = urllib.request.Request(base + "/api/refit?k=1", data=b"", method="POST", headers={"Origin": base, "Sec-Fetch-Site": "same-origin"})
+        assert urllib.request.urlopen(req, timeout=10).status == 200
+        # a truncated final PCM frame (odd byte count) is dropped and the upload still works (never a 500)
+        y_odd, _ = wav_bytes_to_audio(_post(base + "/api/roundtrip", wav[:-1]).read())
+        assert len(y_odd) > 0
+        # a long upload is decoded only up to max_input_seconds (tail), so the answer is bounded
+        long_wav = audio_to_wav_bytes(proto_speech(6.0, seed=3), 16000)
+        y, _ = wav_bytes_to_audio(long_wav, max_seconds=1.0)
+        assert abs(len(y) - 16000) <= 1
+        y2, _ = wav_bytes_to_audio(urllib.request.urlopen(urllib.request.Request(
+            base + "/api/roundtrip", data=long_wav, method="POST", headers={"Content-Type": "audio/wav"}), timeout=60).read())
+        assert abs(len(y2) - 16000) <= 320
+        # a GET with a body does not desync the keep-alive connection
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=10)
+        conn.request("GET", "/healthz", body=b"x" * 100, headers={"Content-Length": "100"})
+        assert conn.getresponse().read() and True
+        conn.request("GET", "/healthz")
+        assert json.loads(conn.getresponse().read())["ok"]
+        conn.close()
+        # a corrupt stored clip is skipped, status keeps working
+        clip = next((tmp_path / "vc" / "experience" / "heard").glob("*.wav"))
+        clip.write_bytes(b"RIFF\x00\x00\x00\x00WAVEjunk")
+        assert json.loads(urllib.request.urlopen(base + "/api/status", timeout=10).read())["experience"]["heard_utterances"] >= 1
+        assert engine.buffer.heard_clips() is not None
+        # generic 500 body: internal exception text never reaches the client
+        original = service.roundtrip
+        service.roundtrip = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("secret path /etc/x"))
+        try:
+            with pytest.raises(urllib.error.HTTPError) as exc:
+                _post(base + "/api/roundtrip", wav)
+            assert exc.value.code == 500 and "secret" not in exc.value.read().decode()
+        finally:
+            service.roundtrip = original
+    finally:
+        httpd.shutdown()
+    # non-ASCII Authorization header is a clean 401 when a token is set; config.json is not rewritten on open
+    service2 = EngineService(engine, token="s3cret-token")
+    httpd2, base2 = _server_with(service2)
+    try:
+        req = urllib.request.Request(base2 + "/api/status", headers={"Authorization": "Bearer café"})
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(req, timeout=10)
+        assert exc.value.code == 401
+    finally:
+        httpd2.shutdown()
+    with pytest.raises(ValueError):
+        EngineService(engine, token="short")
+    cfg_path = tmp_path / "vc" / "config.json"
+    before = cfg_path.stat().st_mtime_ns
+    VoiceCore(tmp_path / "vc")
+    assert cfg_path.stat().st_mtime_ns == before
+    assert not list((tmp_path / "vc").glob("*.tmp"))
+
+
+def test_selftrain_stops_cooperatively(tmp_path):
+    from voicecore.selftrain.loop import SelfTrainer
+
+    cfg = VoiceCoreConfig.tiny()
+    sc = cfg.selftrain
+    sc.min_buffer_seconds = 1.0; sc.codec_snr_target_db = -100; sc.codec_steps_per_round = 500; sc.lm_steps_per_round = 500
+    engine = VoiceCore(tmp_path / "vc", cfg)
+    engine.hear(proto_speech(2.0, seed=1))
+    stop = threading.Event(); stop.set()
+    t0 = __import__("time").time()
+    rep = SelfTrainer(engine, stop_event=stop).round()
+    assert "stopped" in rep["note"] and __import__("time").time() - t0 < 20
+
+
+def test_serve_refuses_bad_settings(tmp_path, monkeypatch):
+    from voicecore.server import serve
+    cfg = VoiceCoreConfig.tiny()
+    VoiceCore(tmp_path / "vc", cfg).save()
+    monkeypatch.delenv("VOICECORE_TOKEN", raising=False)
+    with pytest.raises(SystemExit):
+        serve(tmp_path / "vc", host="0.0.0.0", port=0)            # non-local without a token
+    with pytest.raises(SystemExit):
+        serve(tmp_path / "new", host="127.0.0.1", port=0, init_preset="nope")
+    assert not (tmp_path / "new" / "config.json").exists()

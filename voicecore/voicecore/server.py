@@ -24,18 +24,21 @@ import io
 import json
 import logging
 import signal
+import socket
+import struct
 import threading
 import time
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import numpy as np
 
 from . import __version__
 from .audio.io import to_mono
 from .engine import VoiceCore
+from .lang.cluster import clean_label
 
 STATIC = Path(__file__).parent / "static"
 log = logging.getLogger("voicecore.server")
@@ -49,15 +52,24 @@ class RequestError(ValueError):
         self.status = status
 
 
-def wav_bytes_to_audio(data: bytes) -> tuple[np.ndarray, int]:
+def wav_bytes_to_audio(data: bytes, max_seconds: float | None = None) -> tuple[np.ndarray, int]:
+    """Decode a PCM WAV upload.  With max_seconds, only the last max_seconds of frames are read, so the
+    decoded arrays stay small however large the upload is (the raw body is the only full-size copy)."""
     try:
         with wave.open(io.BytesIO(data), "rb") as wf:
             sr, ch, width, n = wf.getframerate(), wf.getnchannels(), wf.getsampwidth(), wf.getnframes()
+            if sr <= 0 or ch <= 0 or width not in (1, 2, 3, 4):
+                raise RequestError(400, "unsupported WAV format (need PCM 8/16/24/32-bit)")
+            if max_seconds is not None:
+                keep = int(max_seconds * sr)
+                if n > keep:
+                    wf.setpos(n - keep)
+                    n = keep
             raw = wf.readframes(n)
-    except (wave.Error, EOFError) as exc:
+    except (wave.Error, EOFError, struct.error) as exc:
         raise RequestError(400, f"not a PCM WAV file: {exc}") from exc
-    if sr <= 0 or ch <= 0:
-        raise RequestError(400, "WAV header has no sample rate or channels")
+    frame_bytes = width * ch
+    raw = raw[: len(raw) - len(raw) % frame_bytes]      # a truncated final frame is dropped, not a crash
     if width == 2:
         x = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
     elif width == 4:
@@ -70,7 +82,7 @@ def wav_bytes_to_audio(data: bytes) -> tuple[np.ndarray, int]:
     else:
         raise RequestError(400, f"unsupported sample width {width}")
     if ch > 1:
-        x = to_mono(x[: (len(x) // ch) * ch].reshape(-1, ch))
+        x = to_mono(x.reshape(-1, ch))
     if len(x) == 0:
         raise RequestError(400, "WAV file contains no samples")
     return np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0), sr
@@ -90,10 +102,12 @@ class EngineService:
     """Serialises access to the engine (torch models are not safe for concurrent use) and owns the
     background self-training job."""
 
-    def __init__(self, engine: VoiceCore, *, token: str | None = None, max_upload_bytes: int = 64 << 20,
+    def __init__(self, engine: VoiceCore, *, token: str | None = None, max_upload_bytes: int = 32 << 20,
                  max_input_seconds: float = 30.0) -> None:
         self.engine = engine
-        self.token = token
+        if token is not None and (not token.isascii() or not token.isprintable() or len(token) < 8):
+            raise ValueError("token must be at least 8 printable ASCII characters")
+        self.token = token.encode("ascii") if token else None
         self.max_upload_bytes = max_upload_bytes
         self.max_input_seconds = max_input_seconds
         self.lock = threading.Lock()
@@ -102,6 +116,8 @@ class EngineService:
         self.started = time.time()
         self.requests = 0
         self.errors = 0
+        self.stop_event = threading.Event()
+        self.train_thread: threading.Thread | None = None
 
     def _clip(self, wav: np.ndarray, sr: int) -> np.ndarray:
         limit = int(self.max_input_seconds * sr)
@@ -145,13 +161,15 @@ class EngineService:
             return info
 
     def name(self, cluster: int, label: str) -> list[dict]:
-        label = label.strip()[:40]
-        if not label:
-            raise RequestError(400, "label must not be empty")
+        try:
+            label = clean_label(label)
+        except ValueError as exc:
+            raise RequestError(400, str(exc)) from exc
         with self.lock:
-            if cluster < 0 or cluster >= len(self.engine.clusters.counts):
-                raise RequestError(404, f"no cluster {cluster}")
-            self.engine.clusters.name(cluster, label)
+            try:
+                self.engine.clusters.name(cluster, label)
+            except IndexError as exc:
+                raise RequestError(404, str(exc)) from exc
             self.engine.save_light()
             return self.engine.clusters.summary()
 
@@ -167,7 +185,8 @@ class EngineService:
 
             try:
                 with self.lock:
-                    trainer = SelfTrainer(self.engine, on_event=lambda k, d: self.events.append({"kind": k, **d})
+                    trainer = SelfTrainer(self.engine, stop_event=self.stop_event,
+                                          on_event=lambda k, d: self.events.append({"kind": k, **d})
                                           if k in ("codec_step", "lm_step", "selftrain_round", "selftrain_skipped") else None)
                     report = trainer.round()
                 self.selftrain["last"] = report
@@ -179,8 +198,22 @@ class EngineService:
             finally:
                 self.selftrain["running"] = False
 
-        threading.Thread(target=run, name="voicecore-selftrain", daemon=True).start()
+        self.train_thread = threading.Thread(target=run, name="voicecore-selftrain", daemon=True)
+        self.train_thread.start()
         return True
+
+    def shutdown(self, timeout: float = 60.0) -> None:
+        """Ask a running self-training round to stop between steps, wait for it, then save."""
+        self.stop_event.set()
+        t = self.train_thread
+        if t is not None and t.is_alive():
+            log.info("waiting up to %.0fs for the self-training round to stop", timeout)
+            t.join(timeout)
+            if t.is_alive():
+                log.warning("self-training did not stop in time; its own round-end save is the last state")
+                return
+        with self.lock:
+            self.engine.save()
 
     def save(self) -> None:
         with self.lock:
@@ -191,6 +224,7 @@ def make_handler(service: EngineService):
     class Handler(BaseHTTPRequestHandler):
         server_version = f"VoiceCore/{__version__}"
         protocol_version = "HTTP/1.1"
+        timeout = 30          # socket timeout: a stalled or idle connection releases its thread
 
         def log_message(self, fmt, *args):
             log.debug("%s %s", self.address_string(), fmt % args)
@@ -216,7 +250,19 @@ def make_handler(service: EngineService):
                 return True
             header = self.headers.get("Authorization", "")
             supplied = header[7:] if header.startswith("Bearer ") else ""
-            return hmac.compare_digest(supplied, service.token)
+            return hmac.compare_digest(supplied.encode("latin-1", "replace"), service.token)
+
+        def _same_origin(self) -> bool:
+            """Reject state-changing requests that a browser marks as coming from another site, so a web
+            page elsewhere cannot drive a token-less localhost server through the visitor's browser."""
+            site = self.headers.get("Sec-Fetch-Site", "")
+            if site in ("cross-site", "same-site"):
+                return False
+            origin = self.headers.get("Origin")
+            if origin and origin != "null":
+                host = self.headers.get("Host", "")
+                return urlparse(origin).netloc.lower() == host.lower()
+            return True
 
         def _read_body(self) -> bytes:
             try:
@@ -233,7 +279,7 @@ def make_handler(service: EngineService):
             return data
 
         def _read_audio(self) -> tuple[np.ndarray, int]:
-            return wav_bytes_to_audio(self._read_body())
+            return wav_bytes_to_audio(self._read_body(), max_seconds=service.max_input_seconds)
 
         def _drain(self) -> None:
             """Discard an unread body so the keep-alive connection stays in sync."""
@@ -254,6 +300,7 @@ def make_handler(service: EngineService):
         def do_GET(self) -> None:
             url = urlparse(self.path)
             service.requests += 1
+            self._drain()            # a GET carrying a body must not desync the keep-alive connection
             if url.path in ("/", "/index.html"):
                 self._send(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
             elif url.path == "/healthz":
@@ -284,6 +331,10 @@ def make_handler(service: EngineService):
                 self._drain()
                 self._json({"error": "unauthorised"}, 401)
                 return
+            if not self._same_origin():
+                self._drain()
+                self._json({"error": "cross-site request refused"}, 403)
+                return
             started = time.time()
             try:
                 if url.path == "/api/respond":
@@ -291,7 +342,8 @@ def make_handler(service: EngineService):
                     info = service.respond(wav, sr, learn=q.get("learn", "1") not in ("0", "false"))
                     self._send(200, audio_to_wav_bytes(info["reply"], service.engine.sr), "audio/wav", {
                         "X-Cluster": info["cluster"] if info["cluster"] is not None else "",
-                        "X-Cluster-Name": info["cluster_name"], "X-Exchange-Id": info["exchange_id"] or "",
+                        # percent-encoded so any name (any script, any character) is a safe ASCII header value
+                        "X-Cluster-Name": quote(info["cluster_name"], safe=""), "X-Exchange-Id": info["exchange_id"] or "",
                         "X-Reply-Seconds": f"{info['reply_seconds']:.2f}",
                         "Access-Control-Expose-Headers": "X-Cluster, X-Cluster-Name, X-Exchange-Id, X-Reply-Seconds"})
                 elif url.path == "/api/roundtrip":
@@ -333,25 +385,54 @@ def make_handler(service: EngineService):
                 self._json({"error": str(exc)}, exc.status)
             except (BrokenPipeError, ConnectionResetError):
                 log.info("client went away during %s", url.path)
-            except Exception as exc:  # noqa: BLE001 - report to the client, keep serving
+            except Exception:  # noqa: BLE001 - keep serving; details stay in the server log
                 service.errors += 1
                 log.exception("unhandled error in %s", url.path)
-                self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+                self._json({"error": "internal error (see server log)"}, 500)
 
     return Handler
 
 
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, address, handler):
+        self.address_family = socket.getaddrinfo(address[0], address[1], type=socket.SOCK_STREAM)[0][0]
+        super().__init__(address, handler)
+
+
 def serve(root: str | Path, host: str = "127.0.0.1", port: int = 8765, *, open_browser: bool = False,
-          token: str | None = None, max_upload_mb: int = 64, log_level: str = "info") -> None:
+          token: str | None = None, max_upload_mb: int = 32, log_level: str = "info",
+          init_preset: str | None = None) -> None:
+    """Run the web UI/API.  `token` falls back to the VOICECORE_TOKEN environment variable; `init_preset`
+    creates the engine with that preset when the directory holds none (first start in a container)."""
+    import os
+
     logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    if host not in ("127.0.0.1", "localhost", "::1") and not token:
-        raise SystemExit("refusing to listen on a non-local address without --token")
+    token = token or os.environ.get("VOICECORE_TOKEN") or None
+    if host not in LOCAL_HOSTS and not token:
+        raise SystemExit("refusing to listen on a non-local address without --token (or VOICECORE_TOKEN)")
+    root = Path(root).expanduser()
+    if init_preset and not (root / "config.json").exists():
+        from .config import VoiceCoreConfig
+
+        presets = {"tiny": VoiceCoreConfig.tiny, "cpu": VoiceCoreConfig.cpu, "small": VoiceCoreConfig.small,
+                   "default": VoiceCoreConfig}
+        if init_preset not in presets:
+            raise SystemExit(f"unknown preset {init_preset!r}; choose one of {', '.join(presets)}")
+        log.info("no engine at %s: creating one with the %s preset (random weights)", root, init_preset)
+        VoiceCore(root, presets[init_preset]()).save()
     engine = VoiceCore(root)
-    service = EngineService(engine, token=token, max_upload_bytes=max_upload_mb << 20)
-    httpd = ThreadingHTTPServer((host, port), make_handler(service))
-    httpd.daemon_threads = True
-    url = f"http://{host}:{port}"
+    try:
+        service = EngineService(engine, token=token, max_upload_bytes=max_upload_mb << 20)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    httpd = _Server((host, port), make_handler(service))
+    url = f"http://{host}:{port}" if ":" not in host else f"http://[{host}]:{port}"
     log.info("VoiceCore %s serving %s (engine %s, %s)", __version__, url, engine.root,
              "codec trained" if engine.codec_trained else "untrained")
     print(f"VoiceCore web UI at {url}  (Ctrl-C to stop)", flush=True)
@@ -379,5 +460,5 @@ def serve(root: str | Path, host: str = "127.0.0.1", port: int = 8765, *, open_b
     finally:
         httpd.shutdown()
         httpd.server_close()
-        service.save()
+        service.shutdown()
         log.info("engine saved, server stopped")

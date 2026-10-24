@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 import json
-import os
+import logging
+import struct
 import time
 import uuid
+import wave
 from pathlib import Path
 
 import numpy as np
 
 from ..audio.io import read_wav, write_wav
+from ..fsutil import atomic_write_text
+
+log = logging.getLogger("voicecore.buffer")
+UNREADABLE = (OSError, ValueError, EOFError, wave.Error, struct.error)
 
 
 class ExperienceBuffer:
@@ -66,9 +72,7 @@ class ExperienceBuffer:
                 r["feedback"] = int(value)
                 hit = True
         if hit:
-            tmp = self.index.with_suffix(".jsonl.tmp")
-            tmp.write_text("".join(json.dumps(r) + "\n" for r in self.rows), encoding="utf-8")
-            os.replace(tmp, self.index)
+            atomic_write_text(self.index, "".join(json.dumps(r) + "\n" for r in self.rows))
         return hit
 
     def _heard_rows(self) -> list[dict]:
@@ -85,7 +89,7 @@ class ExperienceBuffer:
             else:
                 try:
                     total += len(read_wav(self._abs(r["heard"]))[0]) / self.sr
-                except (OSError, ValueError, EOFError):
+                except UNREADABLE:
                     continue
         return total
 
@@ -95,9 +99,11 @@ class ExperienceBuffer:
             rows = rows[-limit:]          # most recent by time
         out = []
         for r in rows:
+            path = self._abs(r["path"] if r["kind"] == "heard" else r["heard"])
             try:
-                out.append(read_wav(self._abs(r["path"] if r["kind"] == "heard" else r["heard"]))[0])
-            except (OSError, ValueError, EOFError):
+                out.append(read_wav(path)[0])
+            except UNREADABLE as exc:
+                log.warning("skipping unreadable clip %s: %s", path, exc)
                 continue
         return out
 
@@ -109,8 +115,13 @@ class ExperienceBuffer:
             rows = [r for r in rows if r.get("score") is None or r["score"] >= min_score or (r.get("feedback") or 0) > 0]
         return rows
 
-    def load_exchange(self, row: dict) -> tuple[np.ndarray, np.ndarray]:
-        return read_wav(self._abs(row["heard"]))[0], read_wav(self._abs(row["said"]))[0]
+    def load_exchange(self, row: dict) -> tuple[np.ndarray, np.ndarray] | None:
+        """Both clips of an exchange, or None if either file is unreadable (logged, never fatal)."""
+        try:
+            return read_wav(self._abs(row["heard"]))[0], read_wav(self._abs(row["said"]))[0]
+        except UNREADABLE as exc:
+            log.warning("skipping unreadable exchange %s: %s", row.get("id"), exc)
+            return None
 
     def stats(self) -> dict:
         ex = [r for r in self.rows if r["kind"] == "exchange"]

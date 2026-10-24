@@ -9,7 +9,6 @@ Every exchange is stored so the SelfTrainer can learn from it.
 from __future__ import annotations
 
 import json
-import os
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -22,6 +21,7 @@ from .audio.io import load_audio, resample, to_mono, write_wav
 from .codec.model import AudioCodec
 from .codec.train import pick_device
 from .config import VoiceCoreConfig
+from .fsutil import atomic_torch_save, atomic_write_text
 from .lang.cluster import VoiceClusters
 from .lm.generate import generate
 from .lm.model import SpeechLM
@@ -47,7 +47,8 @@ class VoiceCore:
         self.clusters = VoiceClusters(self.fingerprint_dim)
         self.buffer = ExperienceBuffer(self.root / "experience", cfg.codec.sample_rate)
         self._load_weights()          # raises before anything on disk is touched if cfg and weights disagree
-        cfg.save(cfg_path)
+        if not cfg_path.exists() or self._read_json(cfg_path) != json.loads(json.dumps(cfg.to_dict())):
+            cfg.save(cfg_path)        # written atomically, and only when it is new or different
 
     # -- persistence ------------------------------------------------------------------------------
     def mark_codec_trained(self, steps: int) -> None:
@@ -79,27 +80,22 @@ class VoiceCore:
                 self.clusters = VoiceClusters(self.fingerprint_dim)   # fingerprint space changed; start over
 
     @staticmethod
-    def _atomic_torch_save(obj, path: Path) -> None:
-        """Write to a temporary file and rename, so a crash mid-write never leaves a corrupt checkpoint."""
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        torch.save(obj, tmp)
-        os.replace(tmp, path)
-
-    @staticmethod
-    def _atomic_write_text(path: Path, text: str) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+    def _read_json(path: Path):
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
 
     def save(self) -> None:
-        self._atomic_torch_save({"state": self.codec.state_dict(), "version": 1}, self.root / "codec.pt")
-        self._atomic_torch_save({"state": self.lm.state_dict(), "version": 1}, self.root / "lm.pt")
+        """Checkpoints are written crash-safely (temp file, fsync, rename)."""
+        atomic_torch_save({"state": self.codec.state_dict(), "version": 1}, self.root / "codec.pt")
+        atomic_torch_save({"state": self.lm.state_dict(), "version": 1}, self.root / "lm.pt")
         self.save_light()
 
     def save_light(self) -> None:
         """Cheap state (clusters, counters) - written after every hear/respond so it never lags the buffer."""
         self.clusters.save(self.root / "clusters.json")
-        self._atomic_write_text(self.root / "meta.json", json.dumps(self.meta, indent=1))
+        atomic_write_text(self.root / "meta.json", json.dumps(self.meta, indent=1))
 
     @property
     def sr(self) -> int:

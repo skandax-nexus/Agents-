@@ -13,10 +13,27 @@ discovery aid, not a speaker-ID or language-ID model; longer utterances separate
 from __future__ import annotations
 
 import json
-import os
+import re
 from pathlib import Path
 
 import numpy as np
+
+from ..fsutil import atomic_write_bytes, atomic_write_text
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+MAX_LABEL = 40
+
+
+def clean_label(label: str) -> str:
+    """A cluster name: 1-40 printable characters.  Control characters (CR, LF, tabs, NUL ...) are rejected
+    outright rather than stripped, so a tampered label never silently becomes a different name."""
+    label = str(label)
+    if _CONTROL.search(label):
+        raise ValueError("label must not contain control characters")
+    cleaned = label.strip()[:MAX_LABEL]
+    if not cleaned:
+        raise ValueError("label must contain printable characters")
+    return cleaned
 
 
 def _kmeans(X: np.ndarray, k: int, seed: int = 0, iters: int = 60, restarts: int = 6) -> tuple[np.ndarray, np.ndarray]:
@@ -111,7 +128,9 @@ class VoiceClusters:
 
     # -- naming / reporting ----------------------------------------------------------------------------
     def name(self, cluster: int, label: str) -> None:
-        self.names[int(cluster)] = label
+        if not 0 <= int(cluster) < len(self.counts):
+            raise IndexError(f"no cluster {cluster}")
+        self.names[int(cluster)] = clean_label(label)
 
     def label(self, cluster: int | None) -> str:
         if cluster is None:
@@ -122,18 +141,16 @@ class VoiceClusters:
         return [{"id": i, "name": self.label(i), "utterances": c} for i, c in enumerate(self.counts)]
 
     def save(self, path: Path) -> None:
+        import io
+
         path = Path(path)
-        npy = path.with_suffix(".npy")
-        tmp_npy = npy.with_suffix(".npy.tmp")
-        with open(tmp_npy, "wb") as fh:
-            np.save(fh, self.fingerprints)
-        os.replace(tmp_npy, npy)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"dim": self.dim, "centers": self.centers.tolist(), "counts": self.counts,
-                                   "names": self.names, "assignments": self.assignments,
-                                   "mean": self._mean.tolist(), "scale": self._scale.tolist(),
-                                   "max_fingerprints": self.max_fingerprints}))
-        os.replace(tmp, path)
+        buf = io.BytesIO()
+        np.save(buf, self.fingerprints)
+        atomic_write_bytes(path.with_suffix(".npy"), buf.getvalue())
+        atomic_write_text(path, json.dumps({"dim": self.dim, "centers": self.centers.tolist(), "counts": self.counts,
+                                            "names": self.names, "assignments": self.assignments,
+                                            "mean": self._mean.tolist(), "scale": self._scale.tolist(),
+                                            "max_fingerprints": self.max_fingerprints}))
 
     @classmethod
     def load(cls, path: Path) -> VoiceClusters:

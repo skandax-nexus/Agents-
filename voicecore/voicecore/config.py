@@ -109,7 +109,9 @@ class VoiceCoreConfig:
                    top_k=d.get("top_k", 64))
 
     def save(self, path: Path) -> None:
-        Path(path).write_text(json.dumps(self.to_dict(), indent=1))
+        from .fsutil import atomic_write_text
+
+        atomic_write_text(Path(path), json.dumps(self.to_dict(), indent=1))
 
     @classmethod
     def load(cls, path: Path) -> VoiceCoreConfig:
