@@ -272,8 +272,6 @@ def cmd_demo(args) -> int:
     hear, the LM learning structure, replies matching the input's cluster, and a self-training round."""
     import tempfile
 
-    import torch
-
     from .codec.train import CodecTrainer
     from .config import VoiceCoreConfig
     from .data import AudioCorpus, proto_speech
