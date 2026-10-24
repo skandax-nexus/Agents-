@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import random
 import time
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -81,7 +80,7 @@ class SelfTrainer:
         for clip in self.buffer.heard_clips():
             corpus.add_array(clip)
         if corpus_extra is not None:
-            for clip, name in zip(corpus_extra.clips, corpus_extra.names):
+            for clip, name in zip(corpus_extra.clips, corpus_extra.names, strict=True):
                 corpus.add_array(clip, name)
         report["corpus_seconds"] = round(corpus.seconds, 1)
         if corpus.seconds < self.sc.min_buffer_seconds:

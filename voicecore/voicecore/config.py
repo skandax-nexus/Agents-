@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 
@@ -78,21 +78,21 @@ class VoiceCoreConfig:
 
     # -- presets --------------------------------------------------------------
     @classmethod
-    def tiny(cls) -> "VoiceCoreConfig":
+    def tiny(cls) -> VoiceCoreConfig:
         """Runs in seconds on CPU: for tests and the synthetic demo."""
         return cls(codec=CodecConfig(channels=8, latent_dim=32, n_codebooks=2, codebook_size=64),
                    lm=LMConfig(d_model=64, n_layers=2, n_heads=2, d_ff=128, max_frames=256, style_dim=16),
                    train=TrainConfig(batch_size=4, segment_seconds=1.0))
 
     @classmethod
-    def cpu(cls) -> "VoiceCoreConfig":
+    def cpu(cls) -> VoiceCoreConfig:
         """Trainable on a few CPU cores in under an hour on a small real-speech corpus (minutes of audio)."""
         return cls(codec=CodecConfig(channels=16, latent_dim=64, n_codebooks=4, codebook_size=256),
                    lm=LMConfig(d_model=192, n_layers=4, n_heads=4, d_ff=768, max_frames=512, style_dim=32),
                    train=TrainConfig(batch_size=8, segment_seconds=1.0))
 
     @classmethod
-    def small(cls) -> "VoiceCoreConfig":
+    def small(cls) -> VoiceCoreConfig:
         """A laptop-trainable size for real recordings (hours of audio, a GPU helps)."""
         return cls(codec=CodecConfig(channels=32, latent_dim=128, n_codebooks=4, codebook_size=1024),
                    lm=LMConfig(d_model=384, n_layers=8, n_heads=6, d_ff=1536))
@@ -101,7 +101,7 @@ class VoiceCoreConfig:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "VoiceCoreConfig":
+    def from_dict(cls, d: dict) -> VoiceCoreConfig:
         codec = CodecConfig(**{**d.get("codec", {}), "strides": tuple(d.get("codec", {}).get("strides", (2, 4, 5, 8)))})
         return cls(codec=codec, lm=LMConfig(**d.get("lm", {})), train=TrainConfig(**d.get("train", {})),
                    selftrain=SelfTrainConfig(**d.get("selftrain", {})),
@@ -112,5 +112,5 @@ class VoiceCoreConfig:
         Path(path).write_text(json.dumps(self.to_dict(), indent=1))
 
     @classmethod
-    def load(cls, path: Path) -> "VoiceCoreConfig":
+    def load(cls, path: Path) -> VoiceCoreConfig:
         return cls.from_dict(json.loads(Path(path).read_text()))

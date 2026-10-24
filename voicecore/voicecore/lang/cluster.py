@@ -13,6 +13,7 @@ discovery aid, not a speaker-ID or language-ID model; longer utterances separate
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -122,14 +123,20 @@ class VoiceClusters:
 
     def save(self, path: Path) -> None:
         path = Path(path)
-        np.save(path.with_suffix(".npy"), self.fingerprints)
-        path.write_text(json.dumps({"dim": self.dim, "centers": self.centers.tolist(), "counts": self.counts,
-                                    "names": self.names, "assignments": self.assignments,
-                                    "mean": self._mean.tolist(), "scale": self._scale.tolist(),
-                                    "max_fingerprints": self.max_fingerprints}))
+        npy = path.with_suffix(".npy")
+        tmp_npy = npy.with_suffix(".npy.tmp")
+        with open(tmp_npy, "wb") as fh:
+            np.save(fh, self.fingerprints)
+        os.replace(tmp_npy, npy)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"dim": self.dim, "centers": self.centers.tolist(), "counts": self.counts,
+                                   "names": self.names, "assignments": self.assignments,
+                                   "mean": self._mean.tolist(), "scale": self._scale.tolist(),
+                                   "max_fingerprints": self.max_fingerprints}))
+        os.replace(tmp, path)
 
     @classmethod
-    def load(cls, path: Path) -> "VoiceClusters":
+    def load(cls, path: Path) -> VoiceClusters:
         path = Path(path)
         d = json.loads(path.read_text())
         vc = cls(d["dim"], max_fingerprints=d.get("max_fingerprints", 5000))

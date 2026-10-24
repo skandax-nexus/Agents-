@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from pathlib import Path
@@ -22,9 +23,13 @@ class ExperienceBuffer:
         self.index = self.root / "index.jsonl"
         self.rows: list[dict] = []
         if self.index.exists():
-            for line in self.index.read_text().splitlines():
-                if line.strip():
+            for line in self.index.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
                     self.rows.append(json.loads(line))
+                except ValueError:
+                    continue   # a half-written line from a crash; skip it
 
     def _append(self, row: dict) -> dict:
         self.rows.append(row)
@@ -61,7 +66,9 @@ class ExperienceBuffer:
                 r["feedback"] = int(value)
                 hit = True
         if hit:
-            self.index.write_text("".join(json.dumps(r) + "\n" for r in self.rows), encoding="utf-8")
+            tmp = self.index.with_suffix(".jsonl.tmp")
+            tmp.write_text("".join(json.dumps(r) + "\n" for r in self.rows), encoding="utf-8")
+            os.replace(tmp, self.index)
         return hit
 
     def _heard_rows(self) -> list[dict]:

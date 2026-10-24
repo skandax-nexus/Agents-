@@ -105,11 +105,10 @@ def cmd_train_lm(args) -> int:
 
 def cmd_train_dialogue(args) -> int:
     """Learn replies from conversation recordings: turns split on silence become (heard, reply) pairs."""
-    import numpy as np
     from .audio.io import load_audio
     from .audio.vad import split_on_silence
-    from .lm.train import LMTrainer
     from .data import list_audio
+    from .lm.train import LMTrainer
 
     vc = _engine(args)
     pairs = []
@@ -148,9 +147,10 @@ def cmd_talk(args) -> int:
 
 
 def cmd_roundtrip(args) -> int:
-    from .audio.io import load_audio, write_wav
-    from .audio.features import snr_db
     import torch
+
+    from .audio.features import snr_db
+    from .audio.io import load_audio, write_wav
 
     vc = _engine(args)
     wav = load_audio(args.input, vc.sr)
@@ -209,8 +209,8 @@ def cmd_listen(args) -> int:
 
 
 def cmd_selftrain(args) -> int:
-    from .selftrain.loop import SelfTrainer
     from .data import AudioCorpus
+    from .selftrain.loop import SelfTrainer
 
     vc = _engine(args)
     extra = None
@@ -262,7 +262,8 @@ def cmd_feedback(args) -> int:
 def cmd_serve(args) -> int:
     """Local web UI: record or upload, hear the reply, rate it, run self-training."""
     from .server import serve
-    serve(args.root, host=args.host, port=args.port, open_browser=args.open)
+    serve(args.root, host=args.host, port=args.port, open_browser=args.open, token=args.token,
+          max_upload_mb=args.max_upload_mb, log_level=args.log_level)
     return 0
 
 
@@ -270,8 +271,9 @@ def cmd_demo(args) -> int:
     """Everything from scratch on synthetic proto-speech in two 'languages': shows the codec learning to
     hear, the LM learning structure, replies matching the input's cluster, and a self-training round."""
     import tempfile
+
     import torch
-    from .audio.features import snr_db
+
     from .codec.train import CodecTrainer
     from .config import VoiceCoreConfig
     from .data import AudioCorpus, proto_speech
@@ -310,16 +312,12 @@ def cmd_demo(args) -> int:
           f"codes in use {e1['codes_used']}/{e1['codebook_size']}  ({'learned' if learned else 'no gain'})")
 
     lt = LMTrainer(vc.lm, vc.codec, cfg, on_event=_print_event)
-    import random
-    rng = random.Random(0)
-    with torch.no_grad():
-        b = corpus.sample_batch(4, 1.0, rng)
-    print(f"\n[2] speech LM on codec tokens (never sees text)")
+    print("\n[2] speech LM on codec tokens (never sees text)")
     first = lt.train_continuation(corpus, 1, log_every=1000)
     last = lt.train_continuation(corpus, args.lm_steps, log_every=max(1, args.lm_steps // 4))
     print(f"    lm loss {first:.3f} -> {last:.3f} after {args.lm_steps} steps  ({'learned' if last < first - 0.2 else 'no gain'})")
 
-    print(f"\n[3] voice-to-voice: hear an utterance in each language, reply in audio")
+    print("\n[3] voice-to-voice: hear an utterance in each language, reply in audio")
     for lang in (0, 1):
         for seed in (97, 98):
             vc.hear(proto_speech(1.0, seed=seed, language=lang, speaker=1.0 + 0.4 * lang))
@@ -330,9 +328,9 @@ def cmd_demo(args) -> int:
         print(f"    language {lang}: heard 1.0s -> {info['cluster_name']}, replied {info['reply_seconds']:.2f}s of audio")
     print(f"    voice/language clusters: {vc.clusters.summary()}")
 
-    print(f"\n[4] one self-training round (codec + lm + self-play + dialogue)")
+    print("\n[4] one self-training round (codec + lm + self-play + dialogue)")
     st = SelfTrainer(vc, on_event=_print_event)
-    rep = st.round(corpus_extra=corpus)
+    st.round(corpus_extra=corpus)
     vc.save()
     print(f"\nengine saved to {root}  (voicecore status {root})")
     return 0
@@ -379,6 +377,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("serve", help="local web UI at http://localhost:8765 (record, reply, rate, self-train)")
     s.add_argument("root"); s.add_argument("--port", type=int, default=8765); s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--open", action="store_true", help="open the browser")
+    s.add_argument("--token", help="bearer token required on /api/* (mandatory when --host is not local)")
+    s.add_argument("--max-upload-mb", type=int, default=64)
+    s.add_argument("--log-level", default="info", choices=["debug", "info", "warning", "error"])
     s.set_defaults(func=cmd_serve)
     s = sub.add_parser("demo", help="from-scratch learning on synthetic proto-speech (CPU, a few minutes)")
     s.add_argument("--root"); s.add_argument("--seconds", type=float, default=120.0)

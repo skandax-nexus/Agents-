@@ -9,9 +9,10 @@ Every exchange is stored so the SelfTrainer can learn from it.
 from __future__ import annotations
 
 import json
+import os
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Callable, Iterator
 
 import numpy as np
 import torch
@@ -25,7 +26,6 @@ from .lang.cluster import VoiceClusters
 from .lm.generate import generate
 from .lm.model import SpeechLM
 from .selftrain.buffer import ExperienceBuffer
-
 
 FINGERPRINT_MELS = 40
 FINGERPRINT_DIM = 3 * FINGERPRINT_MELS            # acoustic (DSP) fingerprint, used before the codec has trained
@@ -78,15 +78,28 @@ class VoiceCore:
             else:
                 self.clusters = VoiceClusters(self.fingerprint_dim)   # fingerprint space changed; start over
 
+    @staticmethod
+    def _atomic_torch_save(obj, path: Path) -> None:
+        """Write to a temporary file and rename, so a crash mid-write never leaves a corrupt checkpoint."""
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        torch.save(obj, tmp)
+        os.replace(tmp, path)
+
+    @staticmethod
+    def _atomic_write_text(path: Path, text: str) -> None:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+
     def save(self) -> None:
-        torch.save({"state": self.codec.state_dict()}, self.root / "codec.pt")
-        torch.save({"state": self.lm.state_dict()}, self.root / "lm.pt")
+        self._atomic_torch_save({"state": self.codec.state_dict(), "version": 1}, self.root / "codec.pt")
+        self._atomic_torch_save({"state": self.lm.state_dict(), "version": 1}, self.root / "lm.pt")
         self.save_light()
 
     def save_light(self) -> None:
         """Cheap state (clusters, counters) - written after every hear/respond so it never lags the buffer."""
         self.clusters.save(self.root / "clusters.json")
-        (self.root / "meta.json").write_text(json.dumps(self.meta, indent=1))
+        self._atomic_write_text(self.root / "meta.json", json.dumps(self.meta, indent=1))
 
     @property
     def sr(self) -> int:
@@ -102,10 +115,13 @@ class VoiceCore:
 
     # -- perception --------------------------------------------------------------------------------
     def _prepare(self, wav: np.ndarray, sr: int | None = None) -> np.ndarray:
-        """Mono float32 at the engine sample rate."""
+        """Mono float32 at the engine sample rate, finite, clipped to [-1, 1]."""
         wav = to_mono(np.asarray(wav, dtype=np.float32))
+        if wav.ndim != 1:
+            raise ValueError(f"expected a 1-D (mono) or 2-D (channels) array, got shape {wav.shape}")
         if sr is not None and sr != self.sr:
             wav = resample(wav, sr, self.sr)
+        wav = np.clip(np.nan_to_num(wav, nan=0.0, posinf=1.0, neginf=-1.0), -1.0, 1.0)
         return np.ascontiguousarray(wav, dtype=np.float32)
 
     def _tensor(self, wav: np.ndarray, sr: int | None = None) -> torch.Tensor:

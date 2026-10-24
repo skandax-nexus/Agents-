@@ -1,12 +1,10 @@
-import json
 
 import numpy as np
 import pytest
 
 from voicecore.config import VoiceCoreConfig
-from voicecore.data import AudioCorpus, proto_speech
-from voicecore.engine import VoiceCore
-from voicecore.engine import FINGERPRINT_DIM
+from voicecore.data import proto_speech
+from voicecore.engine import FINGERPRINT_DIM, VoiceCore
 from voicecore.lang.cluster import VoiceClusters
 from voicecore.selftrain.buffer import ExperienceBuffer
 from voicecore.selftrain.loop import SelfTrainer
@@ -82,7 +80,7 @@ def test_self_play_does_not_pollute_heard_pool(tmp_path):
 
 
 def test_respond_file(tmp_path):
-    from voicecore.audio.io import write_wav, read_wav
+    from voicecore.audio.io import read_wav, write_wav
     vc = _engine(tmp_path)
     write_wav(tmp_path / "in.wav", proto_speech(0.8, seed=2), 16000)
     vc.respond_file(tmp_path / "in.wav", tmp_path / "out.wav")

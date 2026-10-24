@@ -26,3 +26,11 @@ voicecore = ["static/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I"]
+ignore = ["E501", "E702"]   # long lines and compact `a; b` argparse lines are deliberate
